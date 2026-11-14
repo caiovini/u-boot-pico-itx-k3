@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * Copyright (C) 2026 Yixun Lan <dlan@kernel.org>
+ */
+
+#include "binman.dtsi"
+
+&mimsic {
+	status = "okay";
+};
+
+&maplic {
+	status = "okay";
+};
