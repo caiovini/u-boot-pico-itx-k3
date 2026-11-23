@@ -180,6 +180,15 @@ static const struct ccu_pll_rate_tbl *ccu_plla_lookup_matched_entry(struct ccu_p
 			return entry;
 	}
 
+	/*
+	 * If SPL/BootROM already configured and locked this PLLA (PLLA_SWCR2_EN
+	 * is set, e.g. with spread-spectrum or alternate divider settings for
+	 * PCIe/HSIO refclk), preserve the running PLL state instead of disabling it!
+	 */
+	if ((ccu_read(&pll->common, swcr2) & PLLA_SWCR2_EN) &&
+	    config->tbl_num > 0)
+		return &config->rate_tbl[0];
+
 	return NULL;
 }
 

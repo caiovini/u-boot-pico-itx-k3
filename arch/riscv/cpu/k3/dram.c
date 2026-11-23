@@ -22,8 +22,5 @@ int dram_init_banksize(void)
 
 phys_addr_t board_get_usable_ram_top(phys_size_t total_size)
 {
-	if (gd->ram_size > SZ_2G)
-		return gd->ram_base + SZ_2G;
-
 	return gd->ram_base + gd->ram_size;
 }

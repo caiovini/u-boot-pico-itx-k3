@@ -869,57 +869,85 @@
 			status = "disabled";
 		};
 
-		pcie0_phy: phy@c0b10000 {
-			compatible = "spacemit,k3-combo-phy", "spacemit,k1-combo-phy";
-			reg = <0x0 0xc0b10000 0x0 0x1000>;
-			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTA_DBI>,
-				 <&syscon_apmu CLK_APMU_PCIE_PORTA_MSTE>,
-				 <&syscon_apmu CLK_APMU_PCIE_PORTA_SLV>;
-			clock-names = "dbi", "mstr", "slv";
-			resets = <&syscon_apmu RESET_APMU_PCIE_A_DBI>,
-				 <&syscon_apmu RESET_APMU_PCIE_A_MASTER>,
-				 <&syscon_apmu RESET_APMU_PCIE_A_SLAVE>;
-			reset-names = "dbi", "mstr", "slv";
-			spacemit,apmu = <&syscon_apmu 0x1f0>;
-			spacemit,apb-spare = <&pll>;
-			num-lanes = <1>;
-			#phy-cells = <2>;
-			status = "disabled";
-		};
-
-		pcie1_phy: phy@c0c10000 {
+		pcie0_phy: phy@81d00000 {
 			compatible = "spacemit,k3-pcie-phy", "spacemit,k1-pcie-phy";
-			reg = <0x0 0xc0c10000 0x0 0x1000>;
-			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTB_DBI>,
-				 <&syscon_apmu CLK_APMU_PCIE_PORTB_MSTE>,
-				 <&syscon_apmu CLK_APMU_PCIE_PORTB_SLV>;
-			clock-names = "dbi", "mstr", "slv";
-			resets = <&syscon_apmu RESET_APMU_PCIE_B_DBI>,
-				 <&syscon_apmu RESET_APMU_PCIE_B_MASTER>,
-				 <&syscon_apmu RESET_APMU_PCIE_B_SLAVE>;
-			reset-names = "dbi", "mstr", "slv";
+			reg = <0x0 0x81d00000 0x0 0x1000>;
 			spacemit,apb-spare = <&pll>;
+			spacemit,phy-id = <0>;
 			num-lanes = <2>;
 			#phy-cells = <2>;
 			status = "disabled";
 		};
 
-		pcie0: pcie@ca000000 {
+		pcie1_phy: phy@81e00000 {
+			compatible = "spacemit,k3-pcie-phy", "spacemit,k1-pcie-phy";
+			reg = <0x0 0x81e00000 0x0 0x1000>;
+			spacemit,apb-spare = <&pll>;
+			spacemit,phy-id = <1>;
+			num-lanes = <2>;
+			#phy-cells = <2>;
+			status = "disabled";
+		};
+
+		pcie2_phy: phy@81f00000 {
+			compatible = "spacemit,k3-pcie-phy", "spacemit,k1-pcie-phy";
+			reg = <0x0 0x81f00000 0x0 0x400>;
+			spacemit,apb-spare = <&pll>;
+			spacemit,phy-id = <2>;
+			num-lanes = <1>;
+			#phy-cells = <2>;
+			status = "disabled";
+		};
+
+		pcie3_phy: phy@82000000 {
+			compatible = "spacemit,k3-pcie-phy", "spacemit,k1-pcie-phy";
+			reg = <0x0 0x82000000 0x0 0x400>;
+			spacemit,apb-spare = <&pll>;
+			spacemit,phy-id = <3>;
+			num-lanes = <1>;
+			#phy-cells = <2>;
+			status = "disabled";
+		};
+
+		pcie4_phy: phy@82100000 {
+			compatible = "spacemit,k3-pcie-phy", "spacemit,k1-pcie-phy";
+			reg = <0x0 0x82100000 0x0 0x400>;
+			spacemit,apb-spare = <&pll>;
+			spacemit,phy-id = <4>;
+			num-lanes = <1>;
+			#phy-cells = <2>;
+			status = "disabled";
+		};
+
+		pcie5_phy: phy@82200000 {
+			compatible = "spacemit,k3-pcie-phy", "spacemit,k1-pcie-phy";
+			reg = <0x0 0x82200000 0x0 0x400>;
+			spacemit,apb-spare = <&pll>;
+			spacemit,phy-id = <5>;
+			num-lanes = <1>;
+			#phy-cells = <2>;
+			status = "disabled";
+		};
+
+		pcie0: pcie@80000000 {
 			compatible = "spacemit,k3-pcie", "spacemit,k1-pcie";
-			reg = <0x0 0xca000000 0x0 0x00100000>,
-			      <0x0 0xca100000 0x0 0x00020200>,
-			      <0x0 0x9f000000 0x0 0x00100000>;
-			reg-names = "dbi", "atu", "config";
+			reg = <0x00 0x80000000 0x00 0x00001000>,
+			      <0x00 0x80300000 0x00 0x00003f20>,
+			      <0x11 0x00000000 0x00 0x00010000>,
+			      <0x00 0x82900000 0x00 0x00001000>;
+			reg-names = "dbi", "atu", "config", "phy_ahb";
 			#address-cells = <3>;
 			#size-cells = <2>;
 			device_type = "pci";
 			bus-range = <0x00 0xff>;
-			max-link-speed = <2>;
-			num-lanes = <1>;
+			max-link-speed = <3>;
+			num-lanes = <4>;
 			num-viewport = <8>;
 			linux,pci-domain = <0>;
-			ranges = <0x01000000 0x0 0x00000000 0x0 0x8f000000 0x0 0x00100000>,
-				 <0x02000000 0x0 0x80000000 0x0 0x80000000 0x0 0x0f000000>;
+			spacemit,pcie-port = <0>;
+			spacemit,pcie-mgmt = <0xd42829d8>;
+			ranges = <0x01000000 0x00 0x00010000 0x11 0x00010000 0x00 0x00100000>,
+				 <0x02000000 0x00 0x00110000 0x11 0x00110000 0x00 0x7fef0000>;
 			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTA_DBI>,
 				 <&syscon_apmu CLK_APMU_PCIE_PORTA_MSTE>,
 				 <&syscon_apmu CLK_APMU_PCIE_PORTA_SLV>;
@@ -929,6 +957,8 @@
 				 <&syscon_apmu RESET_APMU_PCIE_A_SLAVE>;
 			reset-names = "dbi", "mstr", "slv";
 			spacemit,apmu = <&syscon_apmu 0x1f0>;
+			phys = <&pcie0_phy 0 4>, <&pcie1_phy 1 4>;
+			phy-names = "pcie-phy0", "pcie-phy1";
 			status = "disabled";
 
 			pcie0_port: pci@0,0 {
@@ -938,28 +968,31 @@
 				#interrupt-cells = <1>;
 				device_type = "pci";
 				ranges;
-				phys = <&pcie0_phy 0 4>;
-				phy-names = "pcie-phy";
+				phys = <&pcie0_phy 0 4>, <&pcie1_phy 1 4>;
+				phy-names = "pcie-phy0", "pcie-phy1";
 				status = "disabled";
 			};
 		};
 
-		pcie1: pcie@ca400000 {
+		pcie1: pcie@80400000 {
 			compatible = "spacemit,k3-pcie", "spacemit,k1-pcie";
-			reg = <0x0 0xca400000 0x0 0x00100000>,
-			      <0x0 0xca500000 0x0 0x00020200>,
-			      <0x0 0x90000000 0x0 0x00100000>;
-			reg-names = "dbi", "atu", "config";
+			reg = <0x00 0x80400000 0x00 0x00001000>,
+			      <0x00 0x80700000 0x00 0x00003f20>,
+			      <0x11 0x80000000 0x00 0x00010000>,
+			      <0x00 0x82c00000 0x00 0x00001000>;
+			reg-names = "dbi", "atu", "config", "phy_ahb";
 			#address-cells = <3>;
 			#size-cells = <2>;
 			device_type = "pci";
 			bus-range = <0x00 0xff>;
-			max-link-speed = <2>;
+			max-link-speed = <3>;
 			num-lanes = <2>;
 			num-viewport = <8>;
 			linux,pci-domain = <1>;
-			ranges = <0x01000000 0x0 0x00000000 0x0 0x90100000 0x0 0x00100000>,
-				 <0x02000000 0x0 0x90200000 0x0 0x90200000 0x0 0x07e00000>;
+			spacemit,pcie-port = <1>;
+			spacemit,pcie-mgmt = <0xd42829d8>;
+			ranges = <0x01000000 0x00 0x00010000 0x11 0x80010000 0x00 0x00100000>,
+				 <0x02000000 0x00 0x80110000 0x11 0x80110000 0x00 0x7fef0000>;
 			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTB_DBI>,
 				 <&syscon_apmu CLK_APMU_PCIE_PORTB_MSTE>,
 				 <&syscon_apmu CLK_APMU_PCIE_PORTB_SLV>;
@@ -969,6 +1002,8 @@
 				 <&syscon_apmu RESET_APMU_PCIE_B_SLAVE>;
 			reset-names = "dbi", "mstr", "slv";
 			spacemit,apmu = <&syscon_apmu 0x1d0>;
+			phys = <&pcie1_phy 1 4>;
+			phy-names = "pcie-phy0";
 			status = "disabled";
 
 			pcie1_port: pci@0,0 {
@@ -979,6 +1014,141 @@
 				device_type = "pci";
 				ranges;
 				phys = <&pcie1_phy 1 4>;
+				phy-names = "pcie-phy";
+				status = "disabled";
+			};
+		};
+
+		pcie2: pcie@80800000 {
+			compatible = "spacemit,k3-pcie", "spacemit,k1-pcie";
+			reg = <0x00 0x80800000 0x00 0x00001000>,
+			      <0x00 0x80b00000 0x00 0x00003f20>,
+			      <0x12 0x00000000 0x00 0x00010000>,
+			      <0x00 0x82d00000 0x00 0x00001000>;
+			reg-names = "dbi", "atu", "config", "phy_ahb";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			device_type = "pci";
+			bus-range = <0x00 0xff>;
+			max-link-speed = <3>;
+			num-lanes = <2>;
+			num-viewport = <8>;
+			linux,pci-domain = <2>;
+			spacemit,pcie-port = <2>;
+			spacemit,pcie-mgmt = <0xd42829d8>;
+			ranges = <0x01000000 0x00 0x00000000 0x12 0x00010000 0x00 0x00100000>,
+				 <0x02000000 0x00 0x00110000 0x12 0x00110000 0x00 0x7fef0000>;
+			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTC_DBI>,
+				 <&syscon_apmu CLK_APMU_PCIE_PORTC_MSTE>,
+				 <&syscon_apmu CLK_APMU_PCIE_PORTC_SLV>;
+			clock-names = "dbi", "mstr", "slv";
+			resets = <&syscon_apmu RESET_APMU_PCIE_C_DBI>,
+				 <&syscon_apmu RESET_APMU_PCIE_C_MASTER>,
+				 <&syscon_apmu RESET_APMU_PCIE_C_SLAVE>;
+			reset-names = "dbi", "mstr", "slv";
+			spacemit,apmu = <&syscon_apmu 0x1c8>;
+			phys = <&pcie2_phy 2 4>, <&pcie3_phy 3 4>;
+			phy-names = "pcie-phy0", "pcie-phy1";
+			status = "disabled";
+
+			pcie2_port: pci@0,0 {
+				reg = <0x0000 0x0 0x0 0x0 0x0>;
+				#address-cells = <3>;
+				#size-cells = <2>;
+				#interrupt-cells = <1>;
+				device_type = "pci";
+				ranges;
+				phys = <&pcie2_phy 2 4>, <&pcie3_phy 3 4>;
+				phy-names = "pcie-phy0", "pcie-phy1";
+				status = "disabled";
+			};
+		};
+
+		pcie3: pcie@80c00000 {
+			compatible = "spacemit,k3-pcie", "spacemit,k1-pcie";
+			reg = <0x00 0x80c00000 0x00 0x00001000>,
+			      <0x00 0x80f00000 0x00 0x00003f20>,
+			      <0x12 0x80000000 0x00 0x00010000>,
+			      <0x00 0x82a00000 0x00 0x00001000>;
+			reg-names = "dbi", "atu", "config", "phy_ahb";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			device_type = "pci";
+			bus-range = <0x00 0xff>;
+			max-link-speed = <3>;
+			num-lanes = <1>;
+			num-viewport = <8>;
+			linux,pci-domain = <3>;
+			spacemit,pcie-port = <3>;
+			spacemit,pcie-mgmt = <0xd42829d8>;
+			ranges = <0x01000000 0x00 0x00010000 0x12 0x80010000 0x00 0x00100000>,
+				 <0x02000000 0x00 0x80110000 0x12 0x80110000 0x00 0x3fef0000>;
+			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTD_DBI>,
+				 <&syscon_apmu CLK_APMU_PCIE_PORTD_MSTE>,
+				 <&syscon_apmu CLK_APMU_PCIE_PORTD_SLV>;
+			clock-names = "dbi", "mstr", "slv";
+			resets = <&syscon_apmu RESET_APMU_PCIE_D_DBI>,
+				 <&syscon_apmu RESET_APMU_PCIE_D_MASTER>,
+				 <&syscon_apmu RESET_APMU_PCIE_D_SLAVE>;
+			reset-names = "dbi", "mstr", "slv";
+			spacemit,apmu = <&syscon_apmu 0x1e0>;
+			phys = <&pcie4_phy 4 4>;
+			phy-names = "pcie-phy0";
+			status = "disabled";
+
+			pcie3_port: pci@0,0 {
+				reg = <0x0000 0x0 0x0 0x0 0x0>;
+				#address-cells = <3>;
+				#size-cells = <2>;
+				#interrupt-cells = <1>;
+				device_type = "pci";
+				ranges;
+				phys = <&pcie4_phy 4 4>;
+				phy-names = "pcie-phy";
+				status = "disabled";
+			};
+		};
+
+		pcie4: pcie@81000000 {
+			compatible = "spacemit,k3-pcie", "spacemit,k1-pcie";
+			reg = <0x00 0x81000000 0x00 0x00001000>,
+			      <0x00 0x81300000 0x00 0x00003f20>,
+			      <0x12 0xc0000000 0x00 0x00010000>,
+			      <0x00 0x82b00000 0x00 0x00001000>;
+			reg-names = "dbi", "atu", "config", "phy_ahb";
+			#address-cells = <3>;
+			#size-cells = <2>;
+			device_type = "pci";
+			bus-range = <0x00 0xff>;
+			max-link-speed = <3>;
+			num-lanes = <1>;
+			num-viewport = <8>;
+			linux,pci-domain = <4>;
+			spacemit,pcie-port = <4>;
+			spacemit,pcie-mgmt = <0xd42829d8>;
+			ranges = <0x01000000 0x00 0x00000000 0x12 0xc0010000 0x00 0x00100000>,
+				 <0x02000000 0x00 0xc0110000 0x12 0xc0110000 0x00 0x3fef0000>;
+			clocks = <&syscon_apmu CLK_APMU_PCIE_PORTE_DBI>,
+				 <&syscon_apmu CLK_APMU_PCIE_PORTE_MSTE>,
+				 <&syscon_apmu CLK_APMU_PCIE_PORTE_SLV>;
+			clock-names = "dbi", "mstr", "slv";
+			resets = <&syscon_apmu RESET_APMU_PCIE_E_DBI>,
+				 <&syscon_apmu RESET_APMU_PCIE_E_MASTER>,
+				 <&syscon_apmu RESET_APMU_PCIE_E_SLAVE>;
+			reset-names = "dbi", "mstr", "slv";
+			spacemit,apmu = <&syscon_apmu 0x1e8>;
+			phys = <&pcie5_phy 5 4>;
+			phy-names = "pcie-phy0";
+			status = "disabled";
+
+			pcie4_port: pci@0,0 {
+				reg = <0x0000 0x0 0x0 0x0 0x0>;
+				#address-cells = <3>;
+				#size-cells = <2>;
+				#interrupt-cells = <1>;
+				device_type = "pci";
+				ranges;
+				phys = <&pcie5_phy 5 4>;
 				phy-names = "pcie-phy";
 				status = "disabled";
 			};
@@ -1581,6 +1751,21 @@
 				 <&syscon_apbc CLK_APBC_AIB_BUS>;
 			clock-names = "func", "bus";
 			spacemit,apbc = <&syscon_apbc>;
+		};
+
+		qspi: spi@d420c000 {
+			compatible = "spacemit,k3-qspi", "spacemit,k1-qspi";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0x0 0xd420c000 0x0 0x1000>,
+			      <0x0 0xb8000000 0x0 0x1000000>;
+			reg-names = "QuadSPI", "QuadSPI-memory";
+			clocks = <&syscon_apmu CLK_APMU_QSPI_BUS>,
+				 <&syscon_apmu CLK_APMU_QSPI>;
+			clock-names = "qspi_en", "qspi";
+			resets = <&syscon_apmu RESET_APMU_QSPI>,
+				 <&syscon_apmu RESET_APMU_QSPI_BUS>;
+			status = "disabled";
 		};
 
 		uart10: serial@d401f000 {

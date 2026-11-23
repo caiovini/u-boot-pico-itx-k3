@@ -879,6 +879,7 @@ static const struct udevice_id fsl_qspi_ids[] = {
 	{ .compatible = "fsl,ls1088a-qspi", .data = (ulong)&ls2080a_data, },
 	{ .compatible = "fsl,ls2080a-qspi", .data = (ulong)&ls2080a_data, },
 	{ .compatible = "spacemit,k1-qspi", .data = (ulong)&spacemit_k1_data, },
+	{ .compatible = "spacemit,k3-qspi", .data = (ulong)&spacemit_k1_data, },
 	{ }
 };
 

@@ -142,3 +142,7 @@ __pycache__
 
 # Clang's compilation database file
 /compile_commands.json
+
+# Tracked SpacemiT K3 board firmware blobs
+!/firmware/
+!/firmware/*

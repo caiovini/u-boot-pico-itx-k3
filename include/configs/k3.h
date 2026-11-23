@@ -18,8 +18,7 @@
 	"fdtoverlay_addr_r=0x138200000\0" \
 	"scriptaddr=0x138300000\0" \
 	"pxefile_addr_r=0x140000000\0" \
-	"ramdisk_addr_r=0x130000000\0" \
-	"bootcmd=setenv pxeuuid k3-pico; setenv serverip 10.1.0.10; setenv ipaddr 10.1.0.5; pxe get; pxe boot\0"
+	"ramdisk_addr_r=0x130000000\0"
 
 
 #endif /* __CONFIG_H */

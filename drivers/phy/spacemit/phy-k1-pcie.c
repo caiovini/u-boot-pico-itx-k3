@@ -175,19 +175,21 @@ static int k3_hsio_calibrate(struct udevice *dev, struct k1_pcie_phy *k1_phy)
 	if (!apbs)
 		apbs = (void __iomem *)K3_SYSCON_APBS_BASE;
 
-	val = readl(apbs + APB_SPARE_RCAL_HSIO);
-	if (!(val & APB_SPARE_PU_CAL_DONE)) {
-		val = readl(apbs + APB_SPARE_PU_CAL);
-		val |= PU_CAL;
-		writel(val, apbs + APB_SPARE_PU_CAL);
+	val = readl(apbs + APB_SPARE_PU_CAL);
+	val |= PU_CAL;
+	writel(val, apbs + APB_SPARE_PU_CAL);
 
-		ret = readl_poll_sleep_timeout(apbs + APB_SPARE_RCAL_HSIO,
-					       val, val & APB_SPARE_PU_CAL_DONE,
-					       100, CALIBRATION_TIMEOUT_US);
-		if (ret) {
-			dev_warn(dev, "K3 APBS HSIO calibration timeout (0x%08x)\n",
-				 val);
-		}
+	ret = readl_poll_sleep_timeout(apbs + APB_SPARE_RCAL_HSIO,
+				       val, val & APB_SPARE_PU_CAL_DONE,
+				       10000, 1000000);
+	if (ret) {
+		dev_warn(dev, "rcal timeout, trim override (0x%08x)\n", val);
+		val = readl(apbs + APB_SPARE_RCAL_HSIO);
+		val |= 0x76a00000;
+		writel(val, apbs + APB_SPARE_RCAL_HSIO);
+		val = readl(apbs + APB_SPARE_RCAL_HSIO);
+		val |= 0x80000000;
+		writel(val, apbs + APB_SPARE_RCAL_HSIO);
 	}
 
 	k3_phy_calibrated = true;
@@ -282,6 +284,8 @@ static int k3_pcie_phy_init_hw(struct phy *phy, struct k1_pcie_phy *k1_phy)
 
 	k3_hsio_calibrate(phy->dev, k1_phy);
 
+	printf("Now int init_x%d_puphy...\n", lane);
+
 	/* Select 100MHz reference clock with SSC in PLL REG1 & REG2 */
 	val = readl(regs + K3_PHY_PLL_REG1);
 	val &= ~K3_PHY_PLL_REG1_VCO;
@@ -289,35 +293,65 @@ static int k3_pcie_phy_init_hw(struct phy *phy, struct k1_pcie_phy *k1_phy)
 	writel(val, regs + K3_PHY_PLL_REG1);
 
 	val = readl(regs + K3_PHY_PLL_REG2);
-	val |= K3_PHY_PLL_SEL_REF100;
+	val &= ~K3_PHY_PLL_SEL_REF100;
 	writel(val, regs + K3_PHY_PLL_REG2);
 
-	/* Configure RX termination and RC calibration per lane */
 	for (i = 0; i < lane; i++) {
 		val = readl(regs + PCIE_RX_REG1 + PHY_LANE_OFFSET * i);
-		val &= ~(AFE_RTERM_REG | K3_RX_RC_CALI | GENMASK(1, 0));
-		val |= FIELD_PREP(AFE_RTERM_REG, 0x8) |
-		       FIELD_PREP(K3_RX_RC_CALI, 0x7);
+		val &= ~GENMASK(1, 0);
 		writel(val, regs + PCIE_RX_REG1 + PHY_LANE_OFFSET * i);
-
-		val = readl(regs + PCIE_PU_ADDR_CLK_CFG + PHY_LANE_OFFSET * i);
-		val &= ~CFG_INTERNAL_TIMER_ADJ;
-		val |= FIELD_PREP(CFG_INTERNAL_TIMER_ADJ, K3_PHY_CLK_REFCLK_24M) |
-		       K3_PHY_CLK_PU_SSC_OUT | CFG_SW_PHY_INIT_DONE | 0x78;
-		writel(val, regs + PCIE_PU_ADDR_CLK_CFG + PHY_LANE_OFFSET * i);
 	}
 
-	/* Force receiver retry status */
-	writel(CFG_FORCE_RCV_RETRY, regs + PCIE_RC_DONE_STATUS);
+	val = readl(regs + K3_PHY_PLL_REG2);
+	val |= BIT(20);
+	writel(val, regs + K3_PHY_PLL_REG2);
 
-	/* Poll for PLL lock */
+	writel(0x00006505, regs + PCIE_RX_REG1);
+
+	val = readl(regs + K3_PHY_PLL_REG1);
+	val &= ~GENMASK(27, 24);
+	writel(val, regs + K3_PHY_PLL_REG1);
+
+	/* Configure per-lane TX/PLL/RC and preset registers (0x60, 0x64) */
+	for (i = 0; i < lane; i++) {
+		void __iomem *lbase = regs + PHY_LANE_OFFSET * i;
+
+		val = readl(lbase + 0x0040);
+		val |= BIT(13);
+		writel(val, lbase + 0x0040);
+
+		val = readl(lbase + 0x0004);
+		val &= ~BIT(6);
+		writel(val, lbase + 0x0004);
+
+		val = readl(lbase + 0x000c);
+		val |= BIT(2);
+		writel(val, lbase + 0x000c);
+
+		writel(0xdf987810, lbase + 0x0060);
+
+		val = readl(lbase + 0x0064);
+		val &= 0xff000000;
+		val |= 0x002888b4;
+		writel(val, lbase + 0x0064);
+	}
+
+	for (i = 0; i < lane; i++) {
+		void __iomem *lbase = regs + PHY_LANE_OFFSET * i;
+
+		val = readl(lbase + PCIE_PU_ADDR_CLK_CFG);
+		val |= CFG_SW_PHY_INIT_DONE;
+		writel(val, lbase + PCIE_PU_ADDR_CLK_CFG);
+	}
+
+	printf("waiting pll lock...\n");
 	ret = readl_poll_timeout(regs + PCIE_PU_ADDR_CLK_CFG, val,
-				 val & PLL_READY, PLL_TIMEOUT_US);
+				 val & PLL_READY, 1000000);
 	if (ret) {
-		dev_err(phy->dev, "K3 PCIe PHY PLL lock timeout! reg[0x08]=0x%08x\n",
-			val);
+		printf("PHY PLL Lock Timeout! Status: 0x%x\n", val);
 		return ret;
 	}
+	printf("PHY PLL Locked.\n");
 
 	return 0;
 }
@@ -463,6 +497,14 @@ static int k1_pcie_phy_init(struct phy *phy)
 
 static int k1_pcie_phy_exit(struct phy *phy)
 {
+	struct k1_pcie_phy *k1_phy = dev_get_priv(phy->dev);
+
+	if (k1_phy->is_k3 && k1_phy->apbs_base) {
+		u32 val = readl(k1_phy->apbs_base + APB_SPARE_PU_CAL);
+
+		val |= PU_CAL;
+		writel(val, k1_phy->apbs_base + APB_SPARE_PU_CAL);
+	}
 	return 0;
 }
 
@@ -534,8 +576,10 @@ static int k1_pcie_phy_probe(struct udevice *dev)
 		u32 count = 0;
 
 		ret = dev_read_u32(dev, "num-lanes", &count);
-		if (ret == 0 && count == 1)
-			lanes = 1;
+		if (ret)
+			ret = dev_read_u32(dev, "spacemit,num-lanes", &count);
+		if (ret == 0 && (count == 1 || count == 2 || count == 4))
+			lanes = count;
 		else
 			lanes = 2;
 	}
@@ -624,4 +668,68 @@ U_BOOT_DRIVER(k1_pcie_phy) = {
 	.ops		= &k1_pcie_phy_ops,
 	.probe		= k1_pcie_phy_probe,
 	.priv_auto	= sizeof(struct k1_pcie_phy),
+};
+
+struct k3_usb2_phy_priv {
+	void __iomem *base;
+	struct clk_bulk clks;
+};
+
+static int k3_usb2_phy_init(struct phy *phy)
+{
+	struct k3_usb2_phy_priv *priv = dev_get_priv(phy->dev);
+	u32 val;
+	int i;
+
+	for (i = 0; i < 50000; i++) {
+		if (readl(priv->base + 0x04) & BIT(0))
+			break;
+		udelay(50);
+	}
+
+	writel(0x60ef, priv->base + 0x04);
+	writel(0x1c, priv->base + 0x34);
+
+	val = readl(priv->base + 0x18);
+	val &= ~BIT(0);
+	writel(val, priv->base + 0x18);
+
+	val = readl(priv->base + 0x10);
+	val |= BIT(2);
+	writel(val, priv->base + 0x10);
+
+	return 0;
+}
+
+static const struct phy_ops k3_usb2_phy_ops = {
+	.init = k3_usb2_phy_init,
+};
+
+static int k3_usb2_phy_probe(struct udevice *dev)
+{
+	struct k3_usb2_phy_priv *priv = dev_get_priv(dev);
+
+	priv->base = dev_read_addr_ptr(dev);
+	if (!priv->base)
+		return -EINVAL;
+
+	if (!clk_get_bulk(dev, &priv->clks))
+		clk_enable_bulk(&priv->clks);
+
+	return 0;
+}
+
+static const struct udevice_id k3_usb2_phy_ids[] = {
+	{ .compatible = "spacemit,k3-usb2-phy" },
+	{ .compatible = "spacemit,usb2-phy" },
+	{ }
+};
+
+U_BOOT_DRIVER(k3_usb2_phy) = {
+	.name		= "k3_usb2_phy",
+	.id		= UCLASS_PHY,
+	.of_match	= k3_usb2_phy_ids,
+	.ops		= &k3_usb2_phy_ops,
+	.probe		= k3_usb2_phy_probe,
+	.priv_auto	= sizeof(struct k3_usb2_phy_priv),
 };

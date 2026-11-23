@@ -162,6 +162,42 @@
 	};
 
 	/omit-if-no-ref/
+	pcie2_3_cfg: pcie2-3-cfg {
+		pcie2-3-pins {
+			pinmux = <K3_PADCONF(115, 1)>,	/* pciec_perstn */
+				 <K3_PADCONF(117, 1)>;	/* pciec_clkreqn */
+
+			bias-pull-up = <0>;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+
+	/omit-if-no-ref/
+	pcie3_2_cfg: pcie3-2-cfg {
+		pcie3-2-pins {
+			pinmux = <K3_PADCONF(118, 1)>,	/* pcied_perstn */
+				 <K3_PADCONF(120, 1)>;	/* pcied_clkreqn */
+
+			bias-pull-up = <0>;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+
+	/omit-if-no-ref/
+	pcie4_1_cfg: pcie4-1-cfg {
+		pcie4-1-pins {
+			pinmux = <K3_PADCONF(124, 2)>,	/* pciee_perstn */
+				 <K3_PADCONF(126, 2)>;	/* pciee_clkreqn */
+
+			bias-pull-up = <0>;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+
+	/omit-if-no-ref/
 	pwm0_0_cfg: pwm0-0-cfg {
 		pwm0-0-pins {
 			pinmux = <K3_PADCONF(0, 3)>;	/* pwm0 */
@@ -748,6 +784,29 @@
 
 			bias-pull-up = <0>;
 			drive-strength = <25>;
+		};
+	};
+
+	/omit-if-no-ref/
+	qspi_cfg: qspi-cfg {
+		qspi-pins {
+			pinmux = <K3_PADCONF(138, 0)>,	/* qspi_dat0 */
+				 <K3_PADCONF(139, 0)>,	/* qspi_dat1 */
+				 <K3_PADCONF(140, 0)>,	/* qspi_dat2 */
+				 <K3_PADCONF(141, 0)>,	/* qspi_dat3 */
+				 <K3_PADCONF(144, 0)>;	/* qspi_clk */
+
+			bias-disable;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+
+		qspi-cs0-pins {
+			pinmux = <K3_PADCONF(142, 0)>;	/* qspi_cs0 */
+
+			bias-pull-up = <0>;
+			drive-strength = <25>;
+			power-source = <1800>;
 		};
 	};
 

@@ -6,6 +6,7 @@
  *   Copyright (C) 2026 Inochi Amaoto <inochiama@gmail.com>
  */
 
+#include <asm/gpio.h>
 #include <clk.h>
 #include <dm.h>
 #include <dm/device_compat.h>
@@ -27,6 +28,7 @@
 #define CTRL_PHY_INTF_RMII		FIELD_PREP(CTRL_PHY_INTF_MODE, 0)
 #define CTRL_PHY_INTF_RGMII		FIELD_PREP(CTRL_PHY_INTF_MODE, 1)
 #define CTRL_PHY_INTF_MII		FIELD_PREP(CTRL_PHY_INTF_MODE, 3)
+#define CTRL_WAKE_IRQ_EN		BIT(9)
 
 /* dline register bits */
 #define RGMII_RX_DLINE_EN		BIT(0)
@@ -45,6 +47,7 @@ struct spacemit_dwmac {
 	unsigned int ctrl_offset;
 	unsigned int dline_offset;
 	struct clk_bulk clks;
+	struct gpio_desc phy_reset_gpio;
 };
 
 static int spacemit_dwmac_set_delay(struct spacemit_dwmac *dwmac,
@@ -278,6 +281,19 @@ static int eqos_probe_resources_spacemit(struct udevice *dev)
 	if (ret) {
 		pr_err("Failed to configure delay: %d\n", ret);
 		return ret;
+	}
+
+	/* Pulse PHY hardware reset GPIO before MDIO probe (Matches K3 factory U-Boot) */
+	ret = gpio_request_by_name(dev, "snps,reset-gpio", 0,
+				   &dwmac->phy_reset_gpio,
+				   GPIOD_IS_OUT | GPIOD_IS_OUT_ACTIVE);
+	if (!ret && dm_gpio_is_valid(&dwmac->phy_reset_gpio)) {
+		dm_gpio_set_value(&dwmac->phy_reset_gpio, 0);
+		udelay(2);
+		dm_gpio_set_value(&dwmac->phy_reset_gpio, 1);
+		udelay(20000);
+		dm_gpio_set_value(&dwmac->phy_reset_gpio, 0);
+		udelay(100000);
 	}
 
 	return 0;

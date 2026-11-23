@@ -9,8 +9,8 @@
 #include "k3-pinctrl.dtsi"
 
 / {
-	model = "SpacemiT K3 Pico-ITX";
-	compatible = "spacemit,k3-pico-itx", "spacemit,k3";
+	model = "spacemit k3 itx";
+	compatible = "spacemit,k3-itx", "spacemit,k3-pico-itx", "spacemit,k3";
 
 	aliases {
 		ethernet0 = &eth0;
@@ -186,8 +186,13 @@
 &eth0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&gmac0_rgmii_0_cfg>, <&gmac0_phy_0_cfg>;
-	phy-mode = "rgmii-id";
+	phy-mode = "rgmii";
 	phy-handle = <&phy0>;
+	tx-internal-delay-ps = <2400>;
+	rx-internal-delay-ps = <2000>;
+	snps,reset-gpio = <&gpio 0 15 GPIO_ACTIVE_LOW>;
+	snps,reset-active-low;
+	snps,reset-delays-us = <0 20000 100000>;
 	status = "okay";
 
 	mdio {
@@ -195,8 +200,8 @@
 			compatible = "ethernet-phy-ieee802.3-c22";
 			reg = <1>;
 			reset-gpios = <&gpio 0 15 GPIO_ACTIVE_LOW>;
-			reset-assert-us = <10000>;
-			reset-deassert-us = <10000>;
+			reset-assert-us = <20000>;
+			reset-deassert-us = <100000>;
 		};
 	};
 };
@@ -205,6 +210,21 @@
 	pinctrl-names = "default";
 	pinctrl-0 = <&uart0_0_cfg>;
 	status = "okay";
+};
+
+&qspi {
+	pinctrl-names = "default";
+	pinctrl-0 = <&qspi_cfg>;
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <26500000>;
+		m25p,fast-read;
+		broken-flash-reset;
+		status = "okay";
+	};
 };
 
 &usb2_host {
@@ -244,15 +264,5 @@
 };
 
 &pcie0_port {
-	status = "okay";
-};
-
-&pcie1 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&pcie1_1_cfg>;
-	status = "okay";
-};
-
-&pcie1_port {
 	status = "okay";
 };

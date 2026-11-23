@@ -21,6 +21,7 @@
 
 #define PCIE_MISC_CONTROL_1_OFF	0x8bc
 #define PCIE_DBI_RO_WR_EN		BIT(0)
+#define GEN3_RELATED_OFF		0x8a8
 
 #define PLR_OFFSET			0x700
 #define PCIE_PORT_DEBUG0		(PLR_OFFSET + 0x28)
@@ -34,6 +35,10 @@
 #define PCIE_DEVICEID_SHIFT		16
 #define SPACEMIT_PCIE_VENDOR_ID		0x201F
 #define SPACEMIT_PCIE_DEVICE_ID		0x0001
+#define SPACEMIT_K3_PCIE_DEVICE_ID	0x0002
+
+/* K3 PCIe lane management offset in APMU (0xd42829d8 = APMU_BASE + 0x1d8) */
+#define K3_APMU_PCIE_MGMT_OFFSET	0x01d8
 
 /* Application register offsets */
 #define PCIE_CMD_STATUS			0x04

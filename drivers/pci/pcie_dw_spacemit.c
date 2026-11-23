@@ -33,14 +33,17 @@ struct pcie_dw_spacemit {
 	struct pcie_dw dw;
 	void __iomem		*apmu_base;
 	u32			apmu_offset;
-	void __iomem		*phy_ahb;	/* DT "link" */
+	void __iomem		*pcie_mgmt;
+	void __iomem		*phy_ahb;	/* DT "link" or "phy_ahb" */
 	int			port_id;
 	u32			max_link_speed;
+	u32			num_lanes;
 	bool			is_k3;
 
-	/* reset, clock resources */
+	/* reset, clock, phy resources */
 	struct clk_bulk		clks;
 	struct reset_ctl_bulk	rsts;
+	struct phy_bulk		phys;
 	struct gpio_desc		pwr_on_gpio;
 	int			power_on_status;
 };
@@ -77,12 +80,21 @@ static void pcie_dw_configure(struct pcie_dw_spacemit *pci, u32 cap_speed)
 	val |= cap_speed;
 	writel(val, pci->dw.dbi_base + PCIE_LINK_CTL_2);
 
+	if (pci->num_lanes)
+		dw_pcie_link_set_max_link_width(&pci->dw, pci->num_lanes);
+
 	dw_pcie_dbi_write_enable(&pci->dw, false);
 }
 
 static int is_link_up(struct pcie_dw_spacemit *pci)
 {
 	u32 val;
+
+	if (pci->is_k3 && pci->phy_ahb) {
+		val = spacemit_pcie_phy_ahb_readl(pci, K1X_PHY_AHB_LINK_STS);
+		return ((val & (RDLH_LINK_UP | SMLH_LINK_UP)) ==
+			(RDLH_LINK_UP | SMLH_LINK_UP));
+	}
 
 	val = readl(pci->dw.dbi_base + PCIE_PORT_DEBUG0);
 	val &= PORT_LOGIC_LTSSM_STATE_MASK;
@@ -136,21 +148,6 @@ static int pcie_dw_spacemit_pcie_link_up(struct pcie_dw_spacemit *pci, u32 cap_s
 	return 1;
 }
 
-static void spacemit_pcie_toggle_soft_reset(struct pcie_dw_spacemit *pci)
-{
-	u32 reg;
-
-	reg = spacemit_pcie_readl(pci, PCIE_CTRL_LOGIC);
-	reg |= PCIE_SOFT_RESET;
-	spacemit_pcie_writel(pci, PCIE_CTRL_LOGIC, reg);
-	spacemit_pcie_readl(pci, PCIE_CTRL_LOGIC);
-
-	mdelay(2);
-
-	reg &= ~PCIE_SOFT_RESET;
-	spacemit_pcie_writel(pci, PCIE_CTRL_LOGIC, reg);
-}
-
 static int pcie_set_mode(struct pcie_dw_spacemit *pci,
 			 enum dw_pcie_device_mode mode)
 {
@@ -202,10 +199,73 @@ static int spacemit_pcie_host_init(struct pcie_dw_spacemit *pci)
 
 static int pcie_dw_init_id(struct pcie_dw_spacemit *pci)
 {
+	u16 dev_id = pci->is_k3 ? SPACEMIT_K3_PCIE_DEVICE_ID :
+				  SPACEMIT_PCIE_DEVICE_ID;
+
 	dw_pcie_dbi_write_enable(&pci->dw, true);
 	writew(SPACEMIT_PCIE_VENDOR_ID, pci->dw.dbi_base + PCI_VENDOR_ID);
-	writew(SPACEMIT_PCIE_DEVICE_ID, pci->dw.dbi_base + PCI_DEVICE_ID);
+	writew(dev_id, pci->dw.dbi_base + PCI_DEVICE_ID);
 	dw_pcie_dbi_write_enable(&pci->dw, false);
+
+	return 0;
+}
+
+static int k3_pcie_map_lanes(struct pcie_dw_spacemit *pci)
+{
+	void __iomem *mgmt = pci->pcie_mgmt;
+	u32 mask = 0, set = 0, val;
+
+	if (!mgmt && pci->apmu_base)
+		mgmt = pci->apmu_base + K3_APMU_PCIE_MGMT_OFFSET;
+	if (!mgmt)
+		return 0;
+
+	switch (pci->port_id) {
+	case 0:
+		mask = 0x18;
+		if (pci->num_lanes == 8)
+			set = 0x00;
+		else if (pci->num_lanes == 4)
+			set = 0x10;
+		else if (pci->num_lanes == 2)
+			set = 0x18;
+		else
+			return -EINVAL;
+		break;
+	case 1:
+		if (pci->num_lanes != 2)
+			return -EINVAL;
+		mask = 0x18;
+		set = 0x18;
+		break;
+	case 2:
+		mask = 0x16;
+		if (pci->num_lanes == 2)
+			set = 0x10;
+		else if (pci->num_lanes == 1)
+			set = 0x12;
+		else
+			return -EINVAL;
+		break;
+	case 3:
+		if (pci->num_lanes != 1)
+			return -EINVAL;
+		mask = 0x11;
+		set = 0x10;
+		break;
+	case 4:
+		if (pci->num_lanes != 1)
+			return -EINVAL;
+		mask = 0x10;
+		set = 0x10;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	val = readl(mgmt);
+	val = (val & ~mask) | set;
+	writel(val, mgmt);
 
 	return 0;
 }
@@ -243,88 +303,182 @@ static int pcie_dw_spacemit_probe(struct udevice *dev)
 	struct pci_controller *hose = dev_get_uclass_priv(ctlr);
 	struct phy phy0 = {0};
 	ofnode port;
-	int ret;
+	int ret, i;
 	u32 reg;
 
-	reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
-	reg &= ~LTSSM_EN;
-	spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
-
-	if (pci->is_k3)
-		spacemit_pcie_toggle_soft_reset(pci);
+	pci->dw.first_busno = dev_seq(dev);
+	pci->dw.dev = dev;
 
 	/* enable pcie clk and deassert resets */
 	clk_enable_bulk(&pci->clks);
 	reset_deassert_bulk(&pci->rsts);
 
-	/* set Perst# (fundamental reset) gpio low state*/
-	reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
-	reg |= PCIE_RC_PERST;
-	spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
-
 	if (pci->is_k3) {
+		/*
+		 * Release APP_HOLD_PHY_RST (BIT(30), which defaults to 1 out of reset)
+		 * in both Port A (0x1f0) and Port B (0x1d0, when 4-lane Port 0 bonds
+		 * phy1) BEFORE initializing the PHYs so the PHY PLL can lock!
+		 */
+		reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
+		reg &= ~APP_HOLD_PHY_RST;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+
+		if (pci->port_id == 0 && pci->num_lanes >= 4 && pci->apmu_base) {
+			/* Also enable Port B clocks/resets & release phy1 APP_HOLD_PHY_RST at 0x1d0 */
+			u32 reg_b = readl(pci->apmu_base + 0x1d0);
+
+			reg_b |= 0x3f;
+			reg_b &= ~APP_HOLD_PHY_RST;
+			writel(reg_b, pci->apmu_base + 0x1d0);
+		}
+
+		ret = k3_pcie_map_lanes(pci);
+		if (ret) {
+			dev_err(dev, "failed to map lanes: %d\n", ret);
+			return ret;
+		}
+
+		if (pci->phys.count > 0) {
+			for (i = 0; i < pci->phys.count; i++) {
+				ret = generic_phy_init(&pci->phys.phys[i]);
+				if (ret) {
+					dev_err(dev, "failed to init phy %d: %d\n", i, ret);
+					return ret;
+				}
+				ret = generic_phy_power_on(&pci->phys.phys[i]);
+				if (ret) {
+					dev_err(dev, "failed to power on phy %d: %d\n", i, ret);
+					return ret;
+				}
+			}
+		} else {
+			port = ofnode_first_subnode(dev_ofnode(dev));
+			if (!ofnode_valid(port)) {
+				dev_err(dev, "failed to find PCIe port node\n");
+				return -ENODEV;
+			}
+			for (i = 0; ; i++) {
+				struct phy cphy = {0};
+
+				ret = generic_phy_get_by_index_nodev(port, i, &cphy);
+				if (ret) {
+					if (i == 0) {
+						dev_err(dev, "failed to get pcie-phy: %d\n", ret);
+						return ret;
+					}
+					break;
+				}
+				ret = generic_phy_init(&cphy);
+				if (ret) {
+					dev_err(dev, "failed to init PHY %d: %d\n", i, ret);
+					return ret;
+				}
+				ret = generic_phy_power_on(&cphy);
+				if (ret) {
+					dev_err(dev, "failed to power on PHY %d: %d\n", i, ret);
+					return ret;
+				}
+			}
+		}
+
+		reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
+		reg &= ~LTSSM_EN;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+
+		reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
+		reg |= PCIE_AUX_PWR_DET;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+
+		printf("%s %s: pcie config device cmd in rc mode: 0x%x\n",
+		       dev->driver->name, dev->name, reg);
+
+		/* Configure K3 PERST# in PCIE_CTRL_LOGIC (offset 0x04) */
 		reg = spacemit_pcie_readl(pci, PCIE_CTRL_LOGIC);
-		reg |= K3_PCIE_IGNORE_PERSTN | PCIE_PERSTN_OE | PCIE_PERSTN_OUT;
+		reg |= K3_PCIE_IGNORE_PERSTN;
 		spacemit_pcie_writel(pci, PCIE_CTRL_LOGIC, reg);
-		udelay(1500);
+
+		reg = spacemit_pcie_readl(pci, PCIE_CTRL_LOGIC);
+		reg |= PCIE_PERSTN_OE | PCIE_PERSTN_OUT;
+		spacemit_pcie_writel(pci, PCIE_CTRL_LOGIC, reg);
+
+		reg = spacemit_pcie_readl(pci, PCIE_CTRL_LOGIC);
 		reg &= ~PCIE_PERSTN_OUT;
 		spacemit_pcie_writel(pci, PCIE_CTRL_LOGIC, reg);
-	}
 
-	/* The PHY is described on the root port child node */
-	port = ofnode_first_subnode(dev_ofnode(dev));
-	if (!ofnode_valid(port)) {
-		dev_err(dev, "failed to find PCIe port node\n");
-		return -ENODEV;
-	}
+		udelay(100000);
 
-	/* Ensure PHY clocks/gates and reset hold are released before PHY probe */
-	reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
-	reg |= DEVICE_TYPE_RC | PCIE_AUX_PWR_DET | APP_HOLD_PHY_RST |
-	       PCIE_PHY_LANE_CTRL_MASK;
-	reg &= ~GLOBAL_PHY_RST;
-	spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
-	reg &= ~(u32)APP_HOLD_PHY_RST;
-	spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+		reg = spacemit_pcie_readl(pci, PCIE_CTRL_LOGIC);
+		reg |= PCIE_PERSTN_OUT;
+		spacemit_pcie_writel(pci, PCIE_CTRL_LOGIC, reg);
 
-	ret = generic_phy_get_by_index_nodev(port, 0, &phy0);
-	if (!ret) {
-		ret = generic_phy_init(&phy0);
-		if (ret) {
-			dev_err(dev, "failed to init PHY: %d\n", ret);
-			return ret;
-		}
-
-		ret = generic_phy_power_on(&phy0);
-		if (ret) {
-			dev_err(dev, "failed to power on PHY: %d\n", ret);
-			return ret;
-		}
+		/* Configure GEN3_RELATED_OFF (0x8a8) */
+		reg = readl(pci->dw.dbi_base + GEN3_RELATED_OFF);
+		reg = (reg & 0xff0000ff) | BIT(15);
+		writel(reg, pci->dw.dbi_base + GEN3_RELATED_OFF);
 	} else {
-		dev_err(dev, "failed to get pcie-phy: %d\n", ret);
-		return ret;
+		reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
+		reg &= ~LTSSM_EN;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+
+		/* set Perst# (fundamental reset) gpio low state*/
+		reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
+		reg |= PCIE_RC_PERST;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+
+		/* The PHY is described on the root port child node */
+		port = ofnode_first_subnode(dev_ofnode(dev));
+		if (!ofnode_valid(port)) {
+			dev_err(dev, "failed to find PCIe port node\n");
+			return -ENODEV;
+		}
+
+		/* Ensure PHY clocks/gates and reset hold are released before PHY probe */
+		reg = spacemit_pcie_readl(pci, PCIECTRL_K1X_CONF_DEVICE_CMD);
+		reg |= DEVICE_TYPE_RC | PCIE_AUX_PWR_DET | APP_HOLD_PHY_RST |
+		       PCIE_PHY_LANE_CTRL_MASK;
+		reg &= ~GLOBAL_PHY_RST;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+		reg &= ~(u32)APP_HOLD_PHY_RST;
+		spacemit_pcie_writel(pci, PCIECTRL_K1X_CONF_DEVICE_CMD, reg);
+
+		ret = generic_phy_get_by_index_nodev(port, 0, &phy0);
+		if (!ret) {
+			ret = generic_phy_init(&phy0);
+			if (ret) {
+				dev_err(dev, "failed to init PHY: %d\n", ret);
+				return ret;
+			}
+
+			ret = generic_phy_power_on(&phy0);
+			if (ret) {
+				dev_err(dev, "failed to power on PHY: %d\n", ret);
+				return ret;
+			}
+		} else {
+			dev_err(dev, "failed to get pcie-phy: %d\n", ret);
+			return ret;
+		}
+
+		pcie_set_mode(pci, DW_PCIE_RC_TYPE);
+
+		/* power on the interface */
+		k1x_power_on(pci, 1);
+
+		spacemit_pcie_host_init(pci);
 	}
 
-	pci->dw.first_busno = dev_seq(dev);
-	pci->dw.dev = dev;
-
-	pcie_set_mode(pci, DW_PCIE_RC_TYPE);
-
-	/* power on the interface */
-	k1x_power_on(pci, 1);
-
-	spacemit_pcie_host_init(pci);
 	pcie_dw_setup_host(&pci->dw);
 	pcie_dw_init_id(pci);
 
 	if (!pcie_dw_spacemit_pcie_link_up(pci, pci->max_link_speed)) {
 		printf("PCIE-%d: Link down\n", dev_seq(dev));
-		pcie_dw_prog_outbound_atu_unroll(&pci->dw,
-						 PCIE_ATU_REGION_INDEX0,
-						 PCIE_ATU_TYPE_MEM,
-						 pci->dw.mem.phys_start,
-						 pci->dw.mem.bus_start,
-						 pci->dw.mem.size);
+		if (!pci->is_k3)
+			pcie_dw_prog_outbound_atu_unroll(&pci->dw,
+							 PCIE_ATU_REGION_INDEX0,
+							 PCIE_ATU_TYPE_MEM,
+							 pci->dw.mem.phys_start,
+							 pci->dw.mem.bus_start,
+							 pci->dw.mem.size);
 		return -ENODEV;
 	}
 
@@ -383,23 +537,49 @@ static int pcie_dw_spacemit_of_to_plat(struct udevice *dev)
 	if (dev_read_u32(dev, "max-link-speed", &pcie->max_link_speed) ||
 	    pcie->max_link_speed < LINK_SPEED_GEN_1 ||
 	    pcie->max_link_speed > LINK_SPEED_GEN_3) {
-		pcie->max_link_speed = pcie->is_k3 ? LINK_SPEED_GEN_2 :
+		pcie->max_link_speed = pcie->is_k3 ? LINK_SPEED_GEN_3 :
 						     LINK_SPEED_GEN_1;
 	}
 
-	/* Get APMU regmap from spacemit,apmu property */
+	pcie->num_lanes = dev_read_u32_default(dev, "num-lanes", 1);
+	if (pcie->num_lanes == 0 || pcie->num_lanes > 8)
+		pcie->num_lanes = 1;
+
+	/* Get APMU regmap from spacemit,apmu property or "app" reg */
 	ret = dev_read_phandle_with_args(dev, "spacemit,apmu", NULL, 1, 0,
 					 &args);
-	if (ret)
-		return ret;
+	if (!ret) {
+		pcie->apmu_base = (void __iomem *)ofnode_get_addr(args.node);
+		if (!pcie->apmu_base)
+			return -EINVAL;
+		pcie->apmu_offset = args.args[0];
+	} else {
+		fdt_addr_t app_addr = dev_read_addr_name(dev, "app");
 
-	pcie->apmu_base = (void __iomem *)ofnode_get_addr(args.node);
-	if (!pcie->apmu_base)
-		return -EINVAL;
-	pcie->apmu_offset = args.args[0];
+		if (app_addr == FDT_ADDR_T_NONE)
+			return ret;
+		pcie->apmu_base = (void __iomem *)app_addr;
+		pcie->apmu_offset = 0;
+	}
 
-	/* Derive port ID from DBI base address */
-	pcie->port_id = (dbi_addr - SPACEMIT_PCIE_DBI_BASE) / SPACEMIT_PCIE_DBI_STRIDE;
+	{
+		u32 mgmt_addr = 0;
+
+		if (!dev_read_u32(dev, "spacemit,pcie-mgmt", &mgmt_addr) && mgmt_addr)
+			pcie->pcie_mgmt = (void __iomem *)(uintptr_t)mgmt_addr;
+		else if (pcie->is_k3 && pcie->apmu_offset)
+			pcie->pcie_mgmt = pcie->apmu_base + K3_APMU_PCIE_MGMT_OFFSET;
+	}
+
+	/* Derive port ID from DT or DBI base address */
+	if (dev_read_u32(dev, "spacemit,pcie-port", (u32 *)&pcie->port_id)) {
+		if (dbi_addr >= 0x80000000 && dbi_addr < 0x82000000)
+			pcie->port_id = (dbi_addr - 0x80000000) / SPACEMIT_PCIE_DBI_STRIDE;
+		else
+			pcie->port_id = (dbi_addr - SPACEMIT_PCIE_DBI_BASE) / SPACEMIT_PCIE_DBI_STRIDE;
+	}
+
+	generic_phy_get_bulk(dev, &pcie->phys);
 
 	ret = clk_get_bulk(dev, &pcie->clks);
 	if (ret) {
