@@ -162,6 +162,18 @@
 	};
 
 	/omit-if-no-ref/
+	pcie2_0_cfg: pcie2-0-cfg {
+		pcie2-0-pins {
+			pinmux = <K3_PADCONF(25, 4)>,	/* pciec_perstn */
+				 <K3_PADCONF(27, 4)>;	/* pciec_clkreqn */
+
+			bias-pull-up = <0>;
+			drive-strength = <25>;
+			power-source = <1800>;
+		};
+	};
+
+	/omit-if-no-ref/
 	pcie2_3_cfg: pcie2-3-cfg {
 		pcie2-3-pins {
 			pinmux = <K3_PADCONF(115, 1)>,	/* pciec_perstn */

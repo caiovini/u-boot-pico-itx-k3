@@ -52,6 +52,7 @@
 #include <linux/bitops.h>
 #include <linux/delay.h>
 #include <linux/printk.h>
+#include "rtl8127a_fw.h"
 
 #undef DEBUG_RTL8169
 #undef DEBUG_RTL8169_TX
@@ -84,12 +85,8 @@ static int media[MAX_UNITS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 #define RxPacketMaxSize 0x0800	/* Maximum size supported is 16K-1 */
 #define InterFrameGap	0x03	/* 3 means InterFrameGap = the shortest one */
 
-#define NUM_TX_DESC	64	/* Number of Tx descriptor registers */
-#ifdef CONFIG_SYS_RX_ETH_BUFFER
-  #define NUM_RX_DESC	CONFIG_SYS_RX_ETH_BUFFER
-#else
-  #define NUM_RX_DESC	512	/* Number of Rx descriptor registers */
-#endif
+#define NUM_TX_DESC	1024	/* Number of Tx descriptor registers */
+#define NUM_RX_DESC	512	/* Number of Rx descriptor registers */
 #define RX_BUF_SIZE	1536	/* Rx Buffer size */
 #define RX_BUF_LEN	8192
 
@@ -355,11 +352,13 @@ DEFINE_ALIGN_BUFFER(u8, txb, NUM_TX_DESC * RX_BUF_SIZE, RTL8169_ALIGN);
  * descriptors point to a part of this buffer.
  */
 DEFINE_ALIGN_BUFFER(u8, rxb, NUM_RX_DESC * RX_BUF_SIZE, RTL8169_ALIGN);
+DEFINE_ALIGN_BUFFER(u64, rtl_tally_buf, 32, RTL8169_ALIGN);
 
 struct rtl8169_private {
 	ulong iobase;
 	void *mmio_addr;	/* memory map physical address */
 	int chipset;
+	u8 pci_rev;
 	unsigned long cur_rx;	/* Index into the Rx descriptor buffer of next Rx pkt. */
 	unsigned long cur_tx;	/* Index into the Tx descriptor buffer of next Rx pkt. */
 	unsigned long dirty_tx;
@@ -449,82 +448,313 @@ static u16 rtl_mac_ocp_read(u16 reg_addr)
 	return (u16)RTL_R32(MACOCP);
 }
 
-static void rtl_phy_ocp_write(u16 reg_addr, u16 value)
+static void rtl_mac_ocp_modify(u16 reg_addr, u16 mask, u16 set)
 {
-	u32 data32;
+	u16 data;
+
+	if (mask == 0xffff) {
+		rtl_mac_ocp_write(reg_addr, set);
+		return;
+	}
+
+	data = rtl_mac_ocp_read(reg_addr);
+	rtl_mac_ocp_write(reg_addr, (data & ~mask) | set);
+}
+
+static void rtl_csi_mod(u16 addr, u32 mask, u32 set)
+{
+	u32 val;
 	int i;
 
-	data32 = GPHY_OCP_FLAG | ((u32)(reg_addr / 2) << RTL8125_OCP_ADDR_SHIFT) | value;
-	RTL_W32(GPHY_OCP, data32);
-	udelay(25);
-
-	for (i = 100; i > 0; i--) {
-		if (!(RTL_R32(GPHY_OCP) & GPHY_OCP_FLAG))
+	RTL_W32(0x68, 0x0000f000 | (addr & 0xfff));
+	for (i = 0; i < 100; i++) {
+		if (RTL_R32(0x68) & BIT(31))
+			break;
+		udelay(10);
+	}
+	val = RTL_R32(0x64);
+	RTL_W32(0x64, (val & ~mask) | set);
+	RTL_W32(0x68, 0x8000f000 | (addr & 0xfff));
+	for (i = 0; i < 100; i++) {
+		if (!(RTL_R32(0x68) & BIT(31)))
 			break;
 		udelay(10);
 	}
 }
 
-static u16 rtl_phy_ocp_read(u16 reg_addr)
+static void rtl_ephy_write_raw(int addr, int data)
 {
-	u32 data32;
 	int i;
 
-	data32 = (u32)(reg_addr / 2) << RTL8125_OCP_ADDR_SHIFT;
-	RTL_W32(GPHY_OCP, data32);
-	udelay(25);
-
-	for (i = 100; i > 0; i--) {
-		data32 = RTL_R32(GPHY_OCP);
-		if (data32 & GPHY_OCP_FLAG)
-			return (u16)(data32 & 0xffff);
+	RTL_W32(0x80, 0x80000000U | ((u32)(addr & 0x7f) << 16) | (u32)(data & 0xffff));
+	for (i = 0; i < 100; i++) {
 		udelay(10);
+		if (!(RTL_R32(0x80) & 0x80000000U))
+			break;
 	}
+	udelay(20);
+}
 
+static void rtl_ephy_write(u16 addr, u16 data)
+{
+	rtl_ephy_write_raw(0x0ffe, addr >> 12);
+	rtl_ephy_write_raw(addr & 0xfff, data);
+}
+
+static u16 rtl_sds_phy_read(u16 index, u16 page, u16 reg)
+{
+	int i;
+
+	RTL_W16(0x234a, (index << 11) | (page << 5) | reg);
+	RTL_W16(0x2348, BIT(0));
+	for (i = 0; i < 100; i++) {
+		if (!(RTL_R16(0x2348) & BIT(0)))
+			return RTL_R16(0x234e);
+		udelay(1);
+	}
 	return 0xffff;
 }
 
+static void rtl_sds_phy_write(u16 index, u16 page, u16 reg, u16 val)
+{
+	int i;
+
+	RTL_W16(0x234c, val);
+	RTL_W16(0x234a, (index << 11) | (page << 5) | reg);
+	RTL_W16(0x2348, BIT(1) | BIT(0));
+	for (i = 0; i < 100; i++) {
+		if (!(RTL_R16(0x2348) & BIT(0)))
+			break;
+		udelay(1);
+	}
+}
+
+static void rtl_sds_phy_modify(u16 index, u16 page, u16 reg, u16 clearmask, u16 setmask)
+{
+	u16 val = rtl_sds_phy_read(index, page, reg);
+
+	val = (val & ~clearmask) | setmask;
+	rtl_sds_phy_write(index, page, reg, val);
+}
+
+static bool rtl8127_phy_configured;
+
 static bool rtl8127_is_fiber_mode(void)
 {
+	u8 mode;
+
 	if (rtl_chip_info[tpc->chipset].version != 0x6e)
 		return false;
 
-	return (rtl_mac_ocp_read(0xd006) & 0xff) == FIBER_MODE_RTL8127ATF;
+	mode = (u8)(rtl_mac_ocp_read(0xd006) & 0xff);
+	return mode == 0x07 || mode == 0x08;
 }
 
-/*
- * Initialize Realtek RTL8127ATF 10GbE Fiber (SFP+) SerDes PHY.
- * Sequence derived from PeterSuh-Q3/r8127 and Linux r8169 driver.
- */
-static void rtl8127_hw_fiber_phy_config(void)
+static void rtl8127_switch_mac_mcu_page(u16 page)
 {
-	u16 val;
+	rtl_mac_ocp_modify(0xe446, 0x0003, page & 0x0003);
+}
 
-	/* Disable EEE in MAC OCP 0xe040 */
-	val = rtl_mac_ocp_read(0xe040);
-	val &= ~(BIT(1) | BIT(0));
-	rtl_mac_ocp_write(0xe040, val);
+static void rtl8127_load_mac_mcu_fiber(void)
+{
+	const u16 *code;
+	size_t cnt;
+	u64 ver = 0;
+	u16 reg;
+	size_t i;
 
-	/* Set 10G SerDes link capabilities */
-	RTL_W16(0x233a, 0x801a);
-	val = RTL_R16(0x233e);
-	val &= ~(BIT(13) | BIT(12) | BIT(1) | BIT(0));
-	val |= BIT(12);
-	RTL_W16(0x233e, val);
+	if (tpc->pci_rev == 0x09) {
+		code = rtl8127afa_1_mac_mcu_code;
+		cnt = ARRAY_SIZE(rtl8127afa_1_mac_mcu_code);
+	} else {
+		code = rtl8127a_1_mac_mcu_code;
+		cnt = ARRAY_SIZE(rtl8127a_1_mac_mcu_code);
+	}
 
-	rtl_phy_ocp_write(0xc40a, 0x0000);
-	rtl_phy_ocp_write(0xc466, 0x0003);
-	rtl_phy_ocp_write(0xc808, 0x0000);
-	rtl_phy_ocp_write(0xc80a, 0x0000);
-	val = rtl_phy_ocp_read(0xc804);
-	rtl_phy_ocp_write(0xc804, (val & ~0x000f) | 0x000c);
+	/* Disable UPS and GPHY isolation (r8127_n.c:rtl8127_hw_init) */
+	RTL_W8(0xf1, RTL_R8(0xf1) & ~BIT(7));
+	rtl_mac_ocp_modify(0xd40a, BIT(4), 0x0000);
 
-	/* Toggle SerDes reset */
+	/* Disable MAC MCU breakpoints before writing RAM code */
+	rtl_mac_ocp_write(0xfc48, 0x0000);
+	for (reg = 0xfc28; reg < 0xfc48; reg += 2)
+		rtl_mac_ocp_write(reg, 0x0000);
+	mdelay(3);
+	rtl_mac_ocp_write(0xfc26, 0x0000);
+
+	/* Write MAC MCU patch code in 256-word pages */
+	for (i = 0; i < cnt; i++) {
+		u16 offset = (u16)(i % 256);
+
+		if (offset == 0)
+			rtl8127_switch_mac_mcu_page((u16)(i / 256));
+		rtl_mac_ocp_write(0xf800 + offset * 2, code[i]);
+	}
+	rtl8127_switch_mac_mcu_page(0);
+
+	/* Record 64-bit patch version in page 2 (0xf9f8..0xf9fe) */
+	for (i = 0; i < 4; i++)
+		ver = (ver << 16) | code[cnt - 4 + i];
+	rtl8127_switch_mac_mcu_page(2);
+	for (i = 0; i < 8; i += 2) {
+		rtl_mac_ocp_write((u16)(0xf9f8 + 6 - i), (u16)ver);
+		ver >>= 16;
+	}
+	rtl8127_switch_mac_mcu_page(0);
+
+	if (tpc->pci_rev == 0x09) {
+		rtl_mac_ocp_write(0xfc26, 0x8000);
+		rtl_mac_ocp_write(0xfc28, 0x0862);
+		rtl_mac_ocp_write(0xfc2a, 0x1a44);
+		rtl_mac_ocp_write(0xfc2c, 0x11a0);
+		rtl_mac_ocp_write(0xfc2e, 0x0148);
+		rtl_mac_ocp_write(0xfc32, 0x0166);
+		rtl_mac_ocp_write(0xfc34, 0x1a6a);
+		rtl_mac_ocp_write(0xfc36, 0x1a2c);
+		rtl_mac_ocp_write(0xfc38, 0x51ca);
+		rtl_mac_ocp_write(0xfc3a, 0x41e2);
+		rtl_mac_ocp_write(0xfc3e, 0x027c);
+		rtl_mac_ocp_write(0xfc40, 0x2610);
+		rtl_mac_ocp_write(0xfc48, 0x18ef);
+	} else {
+		/* Exact RTL8127A rev.a (mcfg == 2, rev 0x08) breakpoints from Bianbu r8127.ko */
+		rtl_mac_ocp_write(0xfc26, 0x8000);
+		rtl_mac_ocp_write(0xfc28, 0x1520);
+		rtl_mac_ocp_write(0xfc2a, 0x41e0);
+		rtl_mac_ocp_write(0xfc2c, 0x508c);
+		rtl_mac_ocp_write(0xfc2e, 0x50f6);
+		rtl_mac_ocp_write(0xfc30, 0x34fa);
+		rtl_mac_ocp_write(0xfc32, 0x0166);
+		rtl_mac_ocp_write(0xfc34, 0x1a6a);
+		rtl_mac_ocp_write(0xfc36, 0x1a2c);
+		rtl_mac_ocp_write(0xfc48, 0x00ff);
+	}
+
+	rtl_csi_mod(0x108, 0x00000000, 0x00100000);
+	rtl_mac_ocp_modify(0xc0b6, 0x0000, BIT(0));
+}
+
+static void rtl8127_hw_ephy_config(void)
+{
+	static const struct {
+		u16 addr;
+		u16 val;
+	} ephy_ops[] = {
+		{ 0x8088, 0x0064 }, { 0x8488, 0x0064 }, { 0x8888, 0x0064 }, { 0x8c88, 0x0064 },
+		{ 0x8188, 0x0064 }, { 0x8588, 0x0064 }, { 0x8988, 0x0064 }, { 0x8d88, 0x0064 },
+		{ 0x808c, 0x09b0 }, { 0x848c, 0x09b0 }, { 0x888c, 0x0f90 }, { 0x8c8c, 0x0f90 },
+		{ 0x818c, 0x09b0 }, { 0x858c, 0x09b0 }, { 0x898c, 0x0f90 }, { 0x8d8c, 0x0f90 },
+		{ 0x808a, 0x09b8 }, { 0x848a, 0x09b8 }, { 0x888a, 0x0f98 }, { 0x8c8a, 0x0f98 },
+		{ 0x818a, 0x09b8 }, { 0x858a, 0x09b8 }, { 0x898a, 0x0f98 }, { 0x8d8a, 0x0f98 },
+		{ 0x9020, 0x0080 }, { 0x9420, 0x0080 }, { 0x9820, 0x0080 }, { 0x9c20, 0x0080 },
+		{ 0x901e, 0x0190 }, { 0x941e, 0x0190 }, { 0x981e, 0x0140 }, { 0x9c1e, 0x0140 },
+		{ 0x901c, 0x0190 }, { 0x941c, 0x0190 }, { 0x981c, 0x0140 }, { 0x9c1c, 0x0140 },
+	};
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(ephy_ops); i++)
+		rtl_ephy_write(ephy_ops[i].addr, ephy_ops[i].val);
+
+	rtl_ephy_write_raw(0x0ffe, 0x0000);
+}
+
+static void rtl8127_exit_oob(void)
+{
+	int i;
+
+	RTL_W32(RxConfig, RTL_R32(RxConfig) &
+		~(AcceptErr | AcceptRunt | AcceptBroadcast |
+		  AcceptMulticast | AcceptMyPhys | AcceptAllPhys));
+	rtl_mac_ocp_write(0xc0bc, 0x00ff);
+
+	RTL_W32(FuncEvent, RTL_R32(FuncEvent) | RxDv_Gated_En);
+	RTL_W8(ChipCmd, RTL_R8(ChipCmd) & ~(CmdTxEnb | CmdRxEnb));
+	mdelay(1);
+
+	RTL_W8(ChipCmd, CmdReset);
+	for (i = 1000; i > 0; i--) {
+		if (!(RTL_R8(ChipCmd) & CmdReset))
+			break;
+		udelay(10);
+	}
+
+	RTL_W8(0xd3, RTL_R8(0xd3) & ~0x80);
+	rtl_mac_ocp_modify(0xe8de, BIT(14), 0x0000);
+	for (i = 0; i < 50; i++) {
+		if (RTL_R8(0xd3) & BIT(1))
+			break;
+		udelay(100);
+	}
+
+	/* Exact FIFO thresholds from Realtek r8127 (mtu 1500) */
+	rtl_mac_ocp_write(0xc0a6, 0x0493);
+	rtl_mac_ocp_write(0xc0aa, 0x2c4a);
+	rtl_mac_ocp_write(0xc01e, 0x5555);
+	for (i = 0; i < 50; i++) {
+		if (RTL_R8(0xd3) & BIT(1))
+			break;
+		udelay(100);
+	}
+}
+
+static void rtl8127_sds_phy_reset(void)
+{
+	/* Exact rtl8127_sds_phy_reset_8127 from Bianbu r8127.ko (0x1a166..0x1a238) */
 	RTL_W8(0x2350, RTL_R8(0x2350) & ~BIT(0));
 	udelay(1);
+
 	RTL_W16(0x233a, 0x801f);
 	RTL_W8(0x2350, RTL_R8(0x2350) | BIT(0));
 	udelay(10);
+}
+
+static void rtl8127_hw_sds_phy_config(void)
+{
+	u16 val;
+
+	/* Exact rtl8127_hw_fiber_phy_config from Bianbu r8127.ko (0x19ec0..0x1a070) */
+	val = RTL_R16(0x2400);
+	val = (val | BIT(13)) & ~BIT(8);
+	RTL_W16(0x2400, val);
+
+	/* rtl8127_sds_phy_exit_1g_8127 */
+	rtl_sds_phy_modify(0, 1, 31, BIT(3), 0x0000);
+	rtl_sds_phy_modify(0, 2, 0, BIT(13) | BIT(12) | BIT(6), BIT(6));
+	rtl8127_sds_phy_reset();
+
+	/* rtl8127_set_sds_phy_caps_10g_8127 */
+	RTL_W16(0x233a, 0x801a);
+	val = RTL_R16(0x233e);
+	val = (val & ~(BIT(13) | BIT(12) | BIT(1) | BIT(0))) | BIT(12);
+	RTL_W16(0x233e, val);
+}
+
+static void rtl8127_disable_eee(void)
+{
+	/* In Fiber Mode (HwFiberModeVer != 0), r8127.ko only touches MACOCP 0xe040 & 0xe052 */
+	rtl_mac_ocp_modify(0xe040, BIT(1) | BIT(0), 0x0000);
+	rtl_mac_ocp_modify(0xe052, BIT(0), 0x0000);
+}
+
+/*
+ * Initialize Realtek RTL8127ATF 10GbE Fiber (SFP+) EPHY & SerDes PHY.
+ * Exact sequence from working SpacemiT Bianbu r8127.ko (rtl8127_up -> r8127_fiber.c).
+ */
+static void rtl8127_hw_fiber_phy_config(void)
+{
+	/* 1. rtl8127_powerup_pll (skips copper PHYOCP when HwFiberModeVer != 0) */
+	RTL_W8(0x6f, RTL_R8(0x6f) | BIT(7) | BIT(6));
+
+	/* 2. rtl8127_hw_ephy_config_8127_1 */
+	rtl8127_hw_ephy_config();
+
+	/* 3. rtl8127_hw_fiber_phy_config */
+	rtl8127_hw_sds_phy_config();
+
+	/* 4. rtl8127_disable_eee */
+	rtl8127_disable_eee();
+
+	rtl8127_phy_configured = true;
 }
 
 static int rtl8169_init_board(unsigned long dev_iobase, const char *name)
@@ -536,6 +766,27 @@ static int rtl8169_init_board(unsigned long dev_iobase, const char *name)
 	printf("%s\n", __func__);
 #endif
 	ioaddr = dev_iobase;
+	rtl8127_phy_configured = false;
+
+	/* Identify chip attached to board before reset (matches Linux rtl_init_one) */
+	tmp = RTL_R32(TxConfig);
+	tmp = ((tmp & 0x7c000000) + ((tmp & 0x00800000) << 2)) >> 24;
+
+	tpc->chipset = 0;
+	for (i = ARRAY_SIZE(rtl_chip_info) - 1; i >= 0; i--) {
+		if (tmp == rtl_chip_info[i].version) {
+			tpc->chipset = i;
+			break;
+		}
+	}
+	if (i < 0) {
+		printf("PCI device %s: unknown chip version, assuming RTL-8169\n",
+		       name);
+		printf("PCI device: TxConfig = 0x%lX\n", (unsigned long)RTL_R32(TxConfig));
+	}
+
+	if (rtl_chip_info[tpc->chipset].version == 0x6e)
+		rtl8127_exit_oob();
 
 	/* Soft reset the chip. */
 	RTL_W8(ChipCmd, CmdReset);
@@ -547,24 +798,6 @@ static int rtl8169_init_board(unsigned long dev_iobase, const char *name)
 		else
 			udelay(10);
 
-	/* identify chip attached to board */
-	tmp = RTL_R32(TxConfig);
-	tmp = ((tmp & 0x7c000000) + ((tmp & 0x00800000) << 2)) >> 24;
-
-	for (i = ARRAY_SIZE(rtl_chip_info) - 1; i >= 0; i--){
-		if (tmp == rtl_chip_info[i].version) {
-			tpc->chipset = i;
-			goto match;
-		}
-	}
-
-	/* if unknown chip, assume array element #0, original RTL-8169 in this case */
-	printf("PCI device %s: unknown chip version, assuming RTL-8169\n",
-	       name);
-	printf("PCI device: TxConfig = 0x%lX\n", (unsigned long) RTL_R32(TxConfig));
-	tpc->chipset = 0;
-
-match:
 	return 0;
 }
 
@@ -696,10 +929,8 @@ static int rtl_recv_common(struct udevice *dev, unsigned long dev_iobase,
 
 			for (j = 0; j < 4; j++) {
 				int idx = base + j;
-				phys_addr_t rx_phys = dm_pci_mem_to_phys(
-					dev,
-					(pci_addr_t)(unsigned long)
-					tpc->RxBufferRing[idx]);
+				phys_addr_t rx_phys = (phys_addr_t)(uintptr_t)
+					tpc->RxBufferRing[idx];
 
 				tpc->RxDescArray[idx].buf_addr =
 					cpu_to_le32((u32)rx_phys);
@@ -754,7 +985,9 @@ static int rtl_send_common(struct udevice *dev, unsigned long dev_iobase,
 	phys_addr_t tx_phys;
 	u32 to;
 	u8 *ptxb;
+	bool is_8127 = rtl_chip_info[tpc->chipset].version == 0x6e;
 	int entry = tpc->cur_tx % NUM_TX_DESC;
+	int desc_idx = is_8127 ? (entry * 2) : entry;
 	u32 len = length;
 	int ret;
 
@@ -775,43 +1008,42 @@ static int rtl_send_common(struct udevice *dev, unsigned long dev_iobase,
 
 	rtl_flush_buffer(ptxb, ALIGN(len, RTL8169_ALIGN));
 
-	tx_phys = dm_pci_mem_to_phys(dev, (pci_addr_t)(unsigned long)ptxb);
-	tpc->TxDescArray[entry].buf_Haddr = cpu_to_le32((u32)((u64)tx_phys >> 32));
-	tpc->TxDescArray[entry].buf_addr = cpu_to_le32((u32)tx_phys);
+	tx_phys = (phys_addr_t)(uintptr_t)ptxb;
+	if (is_8127)
+		memset(&tpc->TxDescArray[desc_idx + 1], 0, sizeof(struct TxDesc));
+	tpc->TxDescArray[desc_idx].vlan_tag = 0;
+	tpc->TxDescArray[desc_idx].buf_Haddr = cpu_to_le32((u32)((u64)tx_phys >> 32));
+	tpc->TxDescArray[desc_idx].buf_addr = cpu_to_le32((u32)tx_phys);
 	if (entry != (NUM_TX_DESC - 1)) {
-		tpc->TxDescArray[entry].status =
+		tpc->TxDescArray[desc_idx].status =
 			cpu_to_le32((OWNbit | FSbit | LSbit) |
 				    ((len > ETH_ZLEN) ? len : ETH_ZLEN));
 	} else {
-		tpc->TxDescArray[entry].status =
+		tpc->TxDescArray[desc_idx].status =
 			cpu_to_le32((OWNbit | EORbit | FSbit | LSbit) |
 				    ((len > ETH_ZLEN) ? len : ETH_ZLEN));
 	}
-	rtl_flush_tx_desc(&tpc->TxDescArray[entry]);
-	if (rtl_is_8125(pplat))
-		RTL_W32(TxPoll_8125, 0x1);	/* set polling bit */
+	rtl_flush_tx_desc(&tpc->TxDescArray[desc_idx]);
+	if (is_8127)
+		RTL_W32(TxPoll_8125, BIT(0));
+	else if (rtl_is_8125(pplat))
+		RTL_W16(TxPoll_8125, 0x0001);	/* set queue 0 polling bit */
 	else
 		RTL_W8(TxPoll_8169, 0x40);	/* set polling bit */
 
 	tpc->cur_tx++;
 	to = currticks() + TX_TIMEOUT;
 	do {
-		rtl_inval_tx_desc(&tpc->TxDescArray[entry]);
-	} while ((le32_to_cpu(tpc->TxDescArray[entry].status) & OWNbit)
+		rtl_inval_tx_desc(&tpc->TxDescArray[desc_idx]);
+	} while ((le32_to_cpu(tpc->TxDescArray[desc_idx].status) & OWNbit)
 				&& (currticks() < to));	/* wait */
 
 	if (currticks() >= to) {
-#ifdef DEBUG_RTL8169_TX
-		puts("tx timeout/error\n");
-		printf("%s elapsed time : %lu\n", __func__, currticks()-stime);
-#endif
 		ret = -ETIMEDOUT;
 	} else {
-#ifdef DEBUG_RTL8169_TX
-		puts("tx done\n");
-#endif
 		ret = 0;
 	}
+
 	return ret;
 }
 
@@ -834,15 +1066,151 @@ static void rtl8169_set_rx_mode(void)
 
 	/* IFF_ALLMULTI */
 	/* Too many to filter perfectly -- accept all multicasts. */
-	rx_mode = AcceptBroadcast | AcceptMulticast | AcceptMyPhys;
+	rx_mode = AcceptBroadcast | AcceptMulticast | AcceptMyPhys | AcceptAllPhys;
 	mc_filter[1] = mc_filter[0] = 0xffffffff;
 
-	tmp = rtl8169_rx_config | rx_mode | (RTL_R32(RxConfig) &
-				   rtl_chip_info[tpc->chipset].RxConfigMask);
+	if (rtl_chip_info[tpc->chipset].version == 0x6e) {
+		/* Exact RCR_Cfg from Realtek r8127 (Fetch_8 | Close_Multiple | Pause | DMA_512) */
+		tmp = BIT(30) | BIT(21) | RX_PAUSE_SLOT_ON |
+		      (5U << RxCfgDMAShift) | rx_mode |
+		      (RTL_R32(RxConfig) & rtl_chip_info[tpc->chipset].RxConfigMask);
+	} else if (rtl_chip_info[tpc->chipset].version >= 0x64) {
+		tmp = (8U << 27) | RX_PAUSE_SLOT_ON |
+		      (7U << RxCfgDMAShift) | rx_mode;
+	} else {
+		tmp = rtl8169_rx_config | rx_mode | (RTL_R32(RxConfig) &
+					   rtl_chip_info[tpc->chipset].RxConfigMask);
+	}
 
 	RTL_W32(RxConfig, tmp);
 	RTL_W32(MAR0 + 0, mc_filter[0]);
 	RTL_W32(MAR0 + 4, mc_filter[1]);
+}
+
+static void rtl8169_init_ring(struct udevice *dev);
+
+static void rtl8127_hw_config_mac(struct udevice *dev)
+{
+	struct eth_pdata *plat = dev_get_plat(dev);
+	phys_addr_t tx_desc_phys = (phys_addr_t)(uintptr_t)tpc->TxDescArray;
+	phys_addr_t rx_desc_phys = (phys_addr_t)(uintptr_t)tpc->RxDescArray;
+	phys_addr_t tally_phys = (phys_addr_t)(uintptr_t)rtl_tally_buf;
+	u32 reg, i;
+
+	/* Disable RX filter and soft-reset MAC (r8127_n.c:rtl8127_hw_config) */
+	RTL_W32(RxConfig, RTL_R32(RxConfig) &
+		~(AcceptErr | AcceptRunt | AcceptBroadcast |
+		  AcceptMulticast | AcceptMyPhys | AcceptAllPhys));
+
+	RTL_W32(FuncEvent, RTL_R32(FuncEvent) | RxDv_Gated_En);
+	RTL_W8(ChipCmd, RTL_R8(ChipCmd) & ~(CmdTxEnb | CmdRxEnb));
+	mdelay(1);
+	RTL_W8(ChipCmd, CmdReset);
+	for (i = 1000; i > 0; i--) {
+		if (!(RTL_R8(ChipCmd) & CmdReset))
+			break;
+		udelay(10);
+	}
+
+	RTL_W8(Cfg9346, Cfg9346_Unlock);
+
+	/* Re-program hardware MAC after CmdReset */
+	RTL_W32(MAC0, (u32)plat->enetaddr[0] | ((u32)plat->enetaddr[1] << 8) |
+		      ((u32)plat->enetaddr[2] << 16) | ((u32)plat->enetaddr[3] << 24));
+	RTL_W32(MAC0 + 4, (u32)plat->enetaddr[4] | ((u32)plat->enetaddr[5] << 8));
+
+	RTL_W8(0xf1, RTL_R8(0xf1) & ~BIT(7));
+	RTL_W8(0x34, 0x00);
+	RTL_W8(Config5, RTL_R8(Config5) & ~BIT(0));
+
+	rtl_mac_ocp_modify(0xc0b6, 0xfffe, 0x0000);
+	for (reg = 0xa00; reg < 0xb00; reg += 4)
+		RTL_W32(reg, 0x00000000);
+	RTL_W16(0x7a, 0x0000);
+
+	RTL_W32(0x14, (u32)((u64)tally_phys >> 32));
+	RTL_W32(0x10, (u32)tally_phys);
+	rtl_mac_ocp_modify(0xea84, 0x0000, 0x0003);
+
+	RTL_W32(TxDescStartAddrLow, (u32)tx_desc_phys);
+	RTL_W32(TxDescStartAddrHigh, (u32)((u64)tx_desc_phys >> 32));
+	RTL_W32(RxDescStartAddrLow, (u32)rx_desc_phys);
+	RTL_W32(RxDescStartAddrHigh, (u32)((u64)rx_desc_phys >> 32));
+
+	RTL_W32(TxConfig, (7U << TxDMAShift) | (InterFrameGap << TxInterFrameGapShift));
+	RTL_W16(0x1000, 0x0000);
+	rtl_csi_mod(0x70c, 0xff000000, 0x27000000);
+
+	RTL_W8(Config3, RTL_R8(Config3) & ~BIT(1));
+	RTL_W16(0x0382, 0x221b);
+	RTL_W32(0x4500, 0x00000000);
+	RTL_W16(0x4800, 0x0000);
+	RTL_W32(0x0818, 0x00000000);
+	rtl_mac_ocp_modify(0xd40a, 0x0010, 0x0000);
+	RTL_W8(Config1, RTL_R8(Config1) & ~0x10);
+	rtl_mac_ocp_write(0xc140, 0xffff);
+	rtl_mac_ocp_write(0xc142, 0xffff);
+	rtl_mac_ocp_modify(0xd3e2, 0x0fff, 0x03a9);
+	rtl_mac_ocp_modify(0xd3e4, 0x00ff, 0x0000);
+	rtl_mac_ocp_modify(0xe860, 0x0000, 0x0080);
+
+	/* Use 32-byte TxDesc format (TX_DESC_FMT_STD = BIT(0)) with TxPoll_8125 (0x90) */
+	rtl_mac_ocp_modify(TX_DESC_MODE, TX_DESC_FMT_MASK, TX_DESC_FMT_STD);
+	RTL_W8(0x20e4, RTL_R8(0x20e4) & ~BIT(2));
+	RTL_W8(RX_DESC_MODE,
+	       RTL_R8(RX_DESC_MODE) & ~(RX_DESC_CRC_DROP | RX_DESC_TYPE));
+
+	rtl_mac_ocp_modify(0xe00c, BIT(12), 0x0000);
+	rtl_mac_ocp_modify(0xc0c2, BIT(6), 0x0000);
+	rtl_mac_ocp_modify(0xe614, 0x0f00, 0x0f00);
+	rtl_mac_ocp_modify(0xe63e, 0x0c30, 0x0020);
+
+	/* Enable MAC MCU (0 -> 1) and set BIT(3)|BIT(2) */
+	rtl_mac_ocp_modify(0xc0b4, BIT(0), 0x0000);
+	rtl_mac_ocp_modify(0xc0b4, 0x0000, BIT(0) | BIT(2) | BIT(3));
+
+	rtl_mac_ocp_modify(0xeb6a, 0x00ff, 0x0033);
+	rtl_mac_ocp_modify(0xeb50, 0x03e0, 0x0040);
+	rtl_mac_ocp_modify(0xe056, 0x00f0, 0x0000);
+	RTL_W8(0x57, 0x10);
+	rtl_mac_ocp_modify(0xe040, 0x1003, 0x0000);
+	rtl_mac_ocp_write(0xe0c0, 0x4400);
+	rtl_mac_ocp_modify(0xe052, BIT(3) | BIT(7), BIT(6) | BIT(5));
+	rtl_mac_ocp_modify(0xd430, 0x0fff, 0x045f);
+	RTL_W8(0xd0, RTL_R8(0xd0) | BIT(6) | BIT(7));
+	RTL_W8(0xf2, RTL_R8(0xf2) & ~BIT(3));
+	rtl_mac_ocp_modify(0xe080, BIT(1), 0x0000);
+	rtl_mac_ocp_modify(0xea1c, 0x0307, 0x0001);
+	rtl_mac_ocp_modify(0xeb54, 0x0000, 0x0001);
+	udelay(2);
+	rtl_mac_ocp_modify(0xeb54, 0x0001, 0x0000);
+	RTL_W16(0x1880, RTL_R16(0x1880) & ~0x0030);
+	rtl_mac_ocp_modify(0xd40c, 0xe038, 0x8020);
+	rtl_mac_ocp_write(0xe098, 0xc302);
+	rtl_mac_ocp_modify(0xe032, 0x0003, 0x0000);
+	rtl_mac_ocp_modify(0xe092, 0x00ff, 0x0000);
+	for (i = 0; i < 10; i++) {
+		if (!(rtl_mac_ocp_read(0xe00e) & BIT(13)))
+			break;
+		udelay(1000);
+	}
+	rtl_mac_ocp_modify(0xc0ac, 0x0000, 0x1f80);
+	RTL_W16(0xe2, 0x0000);
+
+	if (rtl8127_is_fiber_mode()) {
+		rtl_mac_ocp_modify(0xd3f0, BIT(0), 0x0000);
+		rtl_mac_ocp_modify(0xd3f2, BIT(0), 0x0000);
+		rtl_mac_ocp_modify(0xe85a, BIT(6), 0x0000);
+		rtl_mac_ocp_modify(0xdc42, BIT(3), 0x0000);
+	}
+
+	RTL_W16(CPlusCmd, 0x0000);
+	RTL_W16(RxMaxSize, RX_BUF_SIZE | 0x8000);
+	RTL_W32(FuncEvent, RTL_R32(FuncEvent) & ~RxDv_Gated_En);
+	rtl8169_set_rx_mode();
+	RTL_W16(RADMFIFO_PROTECT, 0x2001);
+	RTL_W8(Cfg9346, Cfg9346_Lock);
+	udelay(10);
 }
 
 static void rtl8169_hw_start(struct udevice *dev)
@@ -856,20 +1224,75 @@ static void rtl8169_hw_start(struct udevice *dev)
 	printf("%s\n", __func__);
 #endif
 
-#if 0
-	/* Soft reset the chip. */
-	RTL_W8(ChipCmd, CmdReset);
+	if (version == 0x6e && rtl8127_is_fiber_mode()) {
+		u32 phystat;
 
-	/* Check that the chip has finished the reset. */
-	for (i = 1000; i > 0; i--) {
-		if ((RTL_R8(ChipCmd) & CmdReset) == 0)
-			break;
+		if (!rtl8127_phy_configured) {
+			/* 1. Exact rtl8127_open -> rtl8127_up sequence (r8127 11.015.00) */
+			rtl8127_exit_oob();
+			RTL_W8(0x6f, RTL_R8(0x6f) | BIT(7) | BIT(6));
+			rtl8127_load_mac_mcu_fiber();
+			RTL_W8(ChipCmd, CmdReset);
+			for (i = 1000; i > 0; i--) {
+				if (!(RTL_R8(ChipCmd) & CmdReset))
+					break;
+				udelay(10);
+			}
+			rtl8127_hw_fiber_phy_config();
+			rtl8127_hw_config_mac(dev);
+		}
+
+		/* 2. Wait for 10G SerDes link up */
+		for (i = 0; i < 2000; i++) {
+			if (RTL_R32(PHYstatus) & LinkStatus)
+				break;
+			udelay(1000);
+		}
+		mdelay(50);
+
+		/* 3. Exact rtl8127_link_on_patch in live 10G clock domain */
+		rtl8169_init_ring(dev);
+		rtl8127_hw_config_mac(dev);
+		{
+			phys_addr_t tpaddr = (phys_addr_t)(uintptr_t)rtl_tally_buf;
+
+			RTL_W32(0x14, (u32)((u64)tpaddr >> 32));
+			RTL_W32(0x10, (u32)tpaddr | BIT(0));
+			for (i = 0; i < 100; i++) {
+				if (!(RTL_R32(0x10) & BIT(0)))
+					break;
+				udelay(10);
+			}
+		}
+		phystat = RTL_R32(PHYstatus);
+		if (phystat & (BIT(2) | BIT(3) | BIT(4) | BIT(9) | BIT(19)))
+			RTL_W16(RADMFIFO_PROTECT, 0x2001);
 		else
-			udelay(10);
+			RTL_W16(RADMFIFO_PROTECT, 0x0000);
+
+		RTL_W8(ChipCmd, CmdTxEnb | CmdRxEnb);
+		RTL_W32(TxConfig, (7U << TxDMAShift) | (InterFrameGap << TxInterFrameGapShift));
+		rtl8169_set_rx_mode();
+		RTL_W32(IntrMask_8125, 0x00000000);
+		RTL_W32(0x0d0c, 0x00000000);
+
+		printf("rtl8169: 10G SFP+ rev=0x%02x PHYstatus=0x%08x sfp2400=0x%04x sds=0x%04x/0x%04x tgr5=%04x/%04x tgr6_2=0x%04x fib2_1=%04x/%04x sds0_0=%04x mac=%08x:%04x\n",
+		       tpc->pci_rev, phystat, RTL_R16(0x2400),
+		       RTL_R16(0x233a), RTL_R16(0x233e),
+		       rtl_sds_phy_read(0, 5, 0), rtl_sds_phy_read(0, 5, 1),
+		       rtl_sds_phy_read(0, 6, 2),
+		       rtl_sds_phy_read(0, 2, 1), rtl_sds_phy_read(0, 2, 1),
+		       rtl_sds_phy_read(0, 0, 0),
+		       RTL_R32(MAC0), RTL_R16(MAC0 + 4));
+		return;
 	}
-#endif
 
 	RTL_W8(Cfg9346, Cfg9346_Unlock);
+
+	if (version >= 0x64)
+		RTL_W32(FuncEvent, RTL_R32(FuncEvent) | RxDv_Gated_En);
+
+	RTL_W16(CPlusCmd, 0x0000);
 
 	/*
 	 * RTL8125D/8126A/8127A require explicit descriptor-type and CRC-drop setup.
@@ -879,55 +1302,37 @@ static void rtl8169_hw_start(struct udevice *dev)
 	case 0x6a:
 	case 0x66:
 	case 0x6e:
-		/* Reg 0xD8: Disable CRC drop and force legacy 16-byte RX desc */
-		RTL_W8(RX_DESC_MODE, RTL_R8(RX_DESC_MODE) & ~(RX_DESC_CRC_DROP | RX_DESC_TYPE));
-
-		/* RxConfig 0x44: enable RX pause slot (RTL8125B and later) */
-		RTL_W32(RxConfig, RTL_R32(RxConfig) | RX_PAUSE_SLOT_ON);
-
-		/* MAC OCP 0xEB58: TX descriptor format setup */
-		tx_desc_mode = rtl_mac_ocp_read(TX_DESC_MODE) & ~TX_DESC_FMT_MASK;
-
 		if (version == 0x6e) {
-			/* RTL8127A/ATF specific: Tx desc V3 and RADM FIFO protection */
-			rtl_mac_ocp_write(TX_DESC_MODE, tx_desc_mode | TX_DESC_FMT_V3);
-			RTL_W16(RADMFIFO_PROTECT, 0x2001);
-			if (rtl8127_is_fiber_mode())
-				rtl8127_hw_fiber_phy_config();
+			rtl8127_hw_config_mac(dev);
 		} else {
-			/* RTL8125D / RTL8126A specific: standard Tx desc */
-			rtl_mac_ocp_write(TX_DESC_MODE, tx_desc_mode | TX_DESC_FMT_STD);
+			/* Reg 0xD8: Disable CRC drop and force legacy 16-byte RX desc */
+			RTL_W8(RX_DESC_MODE,
+			       RTL_R8(RX_DESC_MODE) & ~(RX_DESC_CRC_DROP | RX_DESC_TYPE));
+
+			/* Single queue / RSS off (rtl_hw_start_8125_common) */
+			RTL_W32(0x0818, 0x00000000);
+			RTL_W16(0x4800, 0x0000);
+			rtl_mac_ocp_write(0xc140, 0xffff);
+			rtl_mac_ocp_write(0xc142, 0xffff);
+			rtl_mac_ocp_write(0xe860, rtl_mac_ocp_read(0xe860) | 0x0080);
+
+			/* RxConfig 0x44: enable RX pause slot (RTL8125B and later) */
+			RTL_W32(RxConfig, RTL_R32(RxConfig) | RX_PAUSE_SLOT_ON);
+
+			/* MAC OCP 0xEB58: clear bits [1:0] to use legacy 16-byte struct TxDesc */
+			tx_desc_mode = rtl_mac_ocp_read(TX_DESC_MODE) & ~TX_DESC_FMT_MASK;
+			rtl_mac_ocp_write(TX_DESC_MODE, tx_desc_mode);
 		}
 		break;
 	default:
 		break;
 	}
 
-	/* RTL-8169sb/8110sb or previous version */
-	if (tpc->chipset <= 5)
-		RTL_W8(ChipCmd, CmdTxEnb | CmdRxEnb);
-
-	RTL_W8(EarlyTxThres, EarlyTxThld);
-
-	/* For gigabit rtl8169 */
-	RTL_W16(RxMaxSize, RxPacketMaxSize);
-
-	/* Set Rx Config register */
-	i = rtl8169_rx_config | (RTL_R32(RxConfig) &
-				 rtl_chip_info[tpc->chipset].RxConfigMask);
-	RTL_W32(RxConfig, i);
-
-	/* Set DMA burst size and Interframe Gap Time */
-	RTL_W32(TxConfig, (TX_DMA_BURST << TxDMAShift) |
-				(InterFrameGap << TxInterFrameGapShift));
-
 	tpc->cur_rx = 0;
 
 	{
-		phys_addr_t tx_desc_phys = dm_pci_mem_to_phys(dev,
-			(pci_addr_t)(unsigned long)tpc->TxDescArray);
-		phys_addr_t rx_desc_phys = dm_pci_mem_to_phys(dev,
-			(pci_addr_t)(unsigned long)tpc->RxDescArray);
+		phys_addr_t tx_desc_phys = (phys_addr_t)(uintptr_t)tpc->TxDescArray;
+		phys_addr_t rx_desc_phys = (phys_addr_t)(uintptr_t)tpc->RxDescArray;
 
 		RTL_W32(TxDescStartAddrLow, (u32)tx_desc_phys);
 		RTL_W32(TxDescStartAddrHigh, (u32)((u64)tx_desc_phys >> 32));
@@ -935,12 +1340,21 @@ static void rtl8169_hw_start(struct udevice *dev)
 		RTL_W32(RxDescStartAddrHigh, (u32)((u64)rx_desc_phys >> 32));
 	}
 
-	/* RTL-8169sc/8110sc or later version */
-	if (tpc->chipset > 5)
-		RTL_W8(ChipCmd, CmdTxEnb | CmdRxEnb);
+	/*
+	 * Enable TX and RX in ChipCmd BEFORE writing TxConfig/RxConfig:
+	 * on RTL8168/8125/8126/8127, writes to TxConfig are ignored while CmdTxEnb == 0.
+	 */
+	RTL_W8(ChipCmd, CmdTxEnb | CmdRxEnb);
 
-	RTL_W8(Cfg9346, Cfg9346_Lock);
-	udelay(10);
+	if (version < 0x64)
+		RTL_W8(EarlyTxThres, EarlyTxThld);
+
+	RTL_W16(RxMaxSize, RxPacketMaxSize);
+
+	/* Set DMA burst size, Interframe Gap Time, and TXCFG_AUTO_FIFO (BIT(7)) on 8125+ */
+	RTL_W32(TxConfig, (TX_DMA_BURST << TxDMAShift) |
+			  (InterFrameGap << TxInterFrameGapShift) |
+			  (version >= 0x64 ? BIT(7) : 0));
 
 	RTL_W32(RxMissed, 0);
 
@@ -948,6 +1362,16 @@ static void rtl8169_hw_start(struct udevice *dev)
 
 	/* no early-rx interrupts */
 	RTL_W16(MultiIntr, RTL_R16(MultiIntr) & 0xF000);
+
+	RTL_W8(Cfg9346, Cfg9346_Lock);
+
+	/* Un-gate RX/TX packet FIFO after rings and TxConfig/RxConfig are armed */
+	if (version >= 0x64) {
+		RTL_W32(FuncEvent, RTL_R32(FuncEvent) & ~RxDv_Gated_En);
+		udelay(100);
+	} else {
+		udelay(10);
+	}
 
 #ifdef DEBUG_RTL8169
 	printf("%s elapsed time : %lu\n", __func__, currticks()-stime);
@@ -966,7 +1390,7 @@ static void rtl8169_init_ring(struct udevice *dev)
 	tpc->cur_rx = 0;
 	tpc->cur_tx = 0;
 	tpc->dirty_tx = 0;
-	memset(tpc->TxDescArray, 0x0, NUM_TX_DESC * sizeof(struct TxDesc));
+	memset(tpc->TxDescArray, 0x0, (NUM_TX_DESC * 2) * sizeof(struct TxDesc));
 	memset(tpc->RxDescArray, 0x0, NUM_RX_DESC * sizeof(struct RxDesc));
 
 	for (i = 0; i < NUM_TX_DESC; i++) {
@@ -984,8 +1408,7 @@ static void rtl8169_init_ring(struct udevice *dev)
 				cpu_to_le32(OWNbit + RX_BUF_SIZE);
 
 		tpc->RxBufferRing[i] = &rxb[i * RX_BUF_SIZE];
-		rx_buf_phys = dm_pci_mem_to_phys(
-			dev, (pci_addr_t)(unsigned long)tpc->RxBufferRing[i]);
+		rx_buf_phys = (phys_addr_t)(uintptr_t)tpc->RxBufferRing[i];
 		tpc->RxDescArray[i].buf_addr = cpu_to_le32((u32)rx_buf_phys);
 		tpc->RxDescArray[i].buf_Haddr = cpu_to_le32((u32)((u64)rx_buf_phys >> 32));
 		rtl_flush_rx_desc(&tpc->RxDescArray[i]);
@@ -1007,6 +1430,13 @@ static void rtl8169_common_start(struct udevice *dev, unsigned char *enetaddr,
 #endif
 
 	ioaddr = dev_iobase;
+
+	/* Program 6-byte hardware MAC using 32-bit RAR writes required by RTL8125/8126/8127 */
+	RTL_W8(Cfg9346, Cfg9346_Unlock);
+	RTL_W32(MAC0, (u32)enetaddr[0] | ((u32)enetaddr[1] << 8) |
+		      ((u32)enetaddr[2] << 16) | ((u32)enetaddr[3] << 24));
+	RTL_W32(MAC0 + 4, (u32)enetaddr[4] | ((u32)enetaddr[5] << 8));
+	RTL_W8(Cfg9346, Cfg9346_Lock);
 
 	rtl8169_init_ring(dev);
 	rtl8169_hw_start(dev);
@@ -1072,14 +1502,14 @@ void rtl8169_eth_stop(struct udevice *dev)
 
 static int rtl8169_write_hwaddr(struct udevice *dev)
 {
+	struct rtl8169_private *priv = dev_get_priv(dev);
 	struct eth_pdata *plat = dev_get_plat(dev);
-	unsigned int i;
 
+	ioaddr = priv->iobase;
 	RTL_W8(Cfg9346, Cfg9346_Unlock);
-
-	for (i = 0; i < MAC_ADDR_LEN; i++)
-		RTL_W8(MAC0 + i, plat->enetaddr[i]);
-
+	RTL_W32(MAC0, (u32)plat->enetaddr[0] | ((u32)plat->enetaddr[1] << 8) |
+		      ((u32)plat->enetaddr[2] << 16) | ((u32)plat->enetaddr[3] << 24));
+	RTL_W32(MAC0 + 4, (u32)plat->enetaddr[4] | ((u32)plat->enetaddr[5] << 8));
 	RTL_W8(Cfg9346, Cfg9346_Lock);
 
 	return 0;
@@ -1129,21 +1559,9 @@ static int rtl_init(unsigned long dev_ioaddr, const char *name,
 	printf("%s: at ioaddr 0x%lx\n", name, ioaddr);
 #endif
 
-	/* RTL8127ATF 10GbE Fiber (SFP+) uses SerDes OCP instead of Clause-22 MDIO */
+	/* RTL8127ATF 10GbE Fiber (SFP+) configures SerDes in rtl8169_hw_start() */
 	if (rtl8127_is_fiber_mode()) {
-		u16 tx_desc_mode;
-
-		RTL_W8(Cfg9346, Cfg9346_Unlock);
-		RTL_W8(RX_DESC_MODE,
-		       RTL_R8(RX_DESC_MODE) & ~(RX_DESC_CRC_DROP | RX_DESC_TYPE));
-		RTL_W32(RxConfig, RTL_R32(RxConfig) | RX_PAUSE_SLOT_ON);
-		tx_desc_mode = rtl_mac_ocp_read(TX_DESC_MODE) & ~TX_DESC_FMT_MASK;
-		rtl_mac_ocp_write(TX_DESC_MODE, tx_desc_mode | TX_DESC_FMT_V3);
-		RTL_W16(RADMFIFO_PROTECT, 0x2001);
-		RTL_W8(Cfg9346, Cfg9346_Lock);
-
-		rtl8127_hw_fiber_phy_config();
-		udelay(100);
+		udelay(10);
 	} else if (!(RTL_R8(PHYstatus) & TBI_Enable)) {
 		int val = mdio_read(PHY_AUTO_NEGO_REG);
 
@@ -1242,7 +1660,8 @@ static int rtl_init(unsigned long dev_ioaddr, const char *name,
 	if (!tpc->RxDescArray)
 		return -ENOMEM;
 
-	tpc->TxDescArray = rtl_alloc_descs(NUM_TX_DESC);
+	/* Allocate 2x 16-byte slots for RTL8127 32-byte TX descriptors (TX_DESC_FMT_STD) */
+	tpc->TxDescArray = rtl_alloc_descs(NUM_TX_DESC * 2);
 	if (!tpc->TxDescArray)
 		return -ENOMEM;
 
@@ -1270,6 +1689,10 @@ static int rtl8169_eth_probe(struct udevice *dev)
 		break;
 	}
 
+	dm_pci_clrset_config16(dev, PCI_COMMAND, 0,
+			       PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+	dm_pci_read_config8(dev, PCI_REVISION_ID, &tpx.pci_rev);
+
 	priv->iobase = (ulong)dm_pci_map_bar(dev,
 					     PCI_BASE_ADDRESS_0 + region * 4,
 					     0, 0,
@@ -1281,6 +1704,12 @@ static int rtl8169_eth_probe(struct udevice *dev)
 		printf(pr_fmt("failed to initialize card: %d\n"), ret);
 		return ret;
 	}
+
+	debug("rtl8169: %s (%s, ver=0x%02x, rev=0x%02x, fiber=%d, PHYstatus=0x%08x) @ 0x%lx\n",
+	      dev->name, rtl_chip_info[tpc->chipset].name,
+	      rtl_chip_info[tpc->chipset].version, tpc->pci_rev,
+	      rtl8127_is_fiber_mode() ? 1 : 0,
+	      RTL_R32(PHYstatus), priv->iobase);
 
 	/*
 	 * WAR for DHCP failure after rebooting from kernel.

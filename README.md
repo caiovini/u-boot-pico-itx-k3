@@ -2131,7 +2131,13 @@ Pico-ITX** (`spacemit/k3-pico-itx`).
   - `drivers/pci/pcie_dw_spacemit.c`, `drivers/pci/pcie_dw_spacemit.h`:
     Added K3 `PCIE_CTRL_LOGIC` (`0x0004`) soft-reset and `PERST#` sequencing
     (`PCIE_PERSTN_OE`, `PCIE_PERSTN_OUT`, `K3_PCIE_IGNORE_PERSTN`), optional
-    `"link"` / `"phy_ahb"` register resources, and outbound iATU Window 0 setup.
+    `"link"` / `"phy_ahb"` register resources, outbound iATU Window 0 setup,
+    and `PMUA_USB_PHY_CTRL0` (`apmu_base + 0x110`) combo-PHY routing (`BIT(1) |
+    BIT(2)`) for `pcie2` (`port_id == 2`, 2-lane Gen3 to onboard RTL8127ATF).
+  - `dts/upstream/src/riscv/spacemit/k3-pico-itx.dts`,
+    `dts/upstream/src/riscv/spacemit/k3-pinctrl.dtsi`:
+    Added `pcie2_0_cfg` pinctrl and enabled `&pcie2_phy`, `&pcie3_phy`,
+    `&pcie2`, and `&pcie2_port` (`Gen3-x2`) alongside `&pcie0` (`Gen3-x4` NVMe).
   - `drivers/phy/spacemit/phy-k1-pcie.c`:
     Added `spacemit,k3-combo-phy` and `spacemit,k3-pcie-phy` support, automatic
     clock/reset enablement, K3 APBS HSIO RTERM calibration (`0xd4090000` offsets
@@ -2139,14 +2145,30 @@ Pico-ITX** (`spacemit/k3-pico-itx`).
     `0x08`), and `#phy-cells = <2>` translation.
   - `board/spacemit/k3/board.c`:
     Hooks `EVT_DM_POST_INIT_R` (`PCI_INIT_R=y`) so all PCIe Root Ports (`pcie0`,
-    `pcie1`) train their links and assign BARs automatically before payload
+    `pcie2`) train their links and assign BARs automatically before payload
     handoff.
 
 * **Realtek RTL8127 10GbE Fiber (`RTL8127ATF`) Support**
-  - `drivers/net/rtl8169.c`:
-    Added indirect GPHY OCP register access (`GPHY_OCP = 0xb8`), RTL8127 fiber
-    mode detection (`MACOCP 0xd006 & 0xff == 0x07`), and SFP+ 10GbE SerDes RX/EQ
-    calibration (`rtl8127_hw_fiber_phy_config()`).
+  - `drivers/net/rtl8169.c`, `drivers/net/rtl8127a_fw.h`:
+    Added full Realtek RTL8127ATF (`10ec:8127`, `ver 0x6e`, `rev 0x08` & `rev
+    0x09`) 10GbE SFP+ Fiber bring-up matching Realtek `r8127` (`11.015.00`):
+    - Fiber mode detection (`MACOCP 0xd006 & 0xff == 0x07` or `0x08`), OOB exit
+      (`rtl8127_exit_oob()`), and revision-matched MAC MCU patch loading
+      (`rtl8127a_1_mac_mcu_code` + `rev 0x08` ROM breakpoints `0xfc26..0xfc48`
+      for `CFG_METHOD_2`; `rtl8127afa_1_mac_mcu_code` for `rev 0x09`).
+    - 10GBASE-R SerDes reset (`MMIO 0x2350 BIT(0)` pulse), PCIe EPHY calibration
+      (`rtl8127_hw_ephy_config()`), SFP+ SerDes RX/EQ/CDR configuration
+      (`rtl8127_hw_sds_phy_config()`), and live 10G clock-domain MAC/ring
+      re-init (`rtl8127_hw_config_mac()`).
+    - 64-bit PCIe DMA descriptor addressing (`phys_addr_t`), 32-byte TX
+      descriptor stride (`TX_DESC_FMT_STD = 0x0001`), 1024-entry TX ring /
+      512-entry RX ring (`NUM_TX_DESC = 1024`, `NUM_RX_DESC = 512`), and
+      cache-line-aligned 4-descriptor RX ring re-arming.
+  - `configs/spacemit_k3_defconfig`:
+    Enabled `CONFIG_ENV_OVERWRITE=y` and `setenv ethact eth1` after `pci enum`
+    so the RTL8127ATF 10GbE SFP+ controller (`eth1: eth_rtl8169`) is selected as
+    the active U-Boot network interface and accepts runtime `ethaddr`/`eth1addr`
+    updates from `config.toml`.
 
 * **HDMI LCD Waveshare Screen Support**
   - `configs/spacemit_k3_defconfig`:
@@ -2304,16 +2326,16 @@ pub unsafe fn uboot_jump_table() -> &'static UBootJumpTable {
 
 ### Direct PCIe MMIO Window Addresses (Alternative to Jump Table)
 
-If your Rust payload drives the RTL8127 10GbE NIC directly over PCIe MMIO after
-U-Boot has trained the link and assigned BARs:
-* **`pcie0` (Port A, 1-lane):**
-  - DBI / Root Complex Config: `0x9000_0000`
-  - Outbound Config Space (iATU): `0x9f00_0000`
-  - 32-bit MEM BAR0 Window: `0x9080_0000`
-* **`pcie1` (Port B, 2-lane):**
-  - DBI / Root Complex Config: `0x9800_0000`
-  - Outbound Config Space (iATU): `0x9f01_0000`
-  - 32-bit MEM BAR0 Window: `0x9880_0000`
+If your Rust payload inspects the M.2 NVMe SSD or RTL8127ATF 10GbE NIC directly
+over PCIe MMIO after U-Boot has trained the links and assigned BARs:
+* **`pcie0` (`pcie@80000000`, 4-lane Gen3 — M.2 2280 NVMe SSD):**
+  - DBI / Root Complex Config: `0x8000_0000`
+  - Outbound Config Space (iATU): `0x8f00_0000`
+  - 64-bit MEM BAR Window: `0x10_0020_0000`
+* **`pcie2` (`pcie@80800000`, 2-lane Gen3 — Realtek RTL8127ATF 10GbE SFP+):**
+  - DBI / Root Complex Config: `0x8080_0000`
+  - Outbound Config Space (iATU): `0x9fe0_0000`
+  - 64-bit MEM BAR2 Window: `0x12_0020_0000`
 
 
 3. Waking X100 (`0..7`) & A100 (`8..15`) Harts via OpenSBI HSM

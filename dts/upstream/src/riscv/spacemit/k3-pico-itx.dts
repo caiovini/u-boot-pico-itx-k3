@@ -257,6 +257,14 @@
 	status = "okay";
 };
 
+&pcie2_phy {
+	status = "okay";
+};
+
+&pcie3_phy {
+	status = "okay";
+};
+
 &pcie0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pcie0_1_cfg>;
@@ -264,5 +272,16 @@
 };
 
 &pcie0_port {
+	status = "okay";
+};
+
+&pcie2 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pcie2_0_cfg>;
+	status = "okay";
+};
+
+&pcie2_port {
+	vpcie3v3-supply = <&reg_aux_vcc3v3>;
 	status = "okay";
 };

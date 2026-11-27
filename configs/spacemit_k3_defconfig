@@ -34,6 +34,7 @@ CONFIG_CMD_REGULATOR=y
 CONFIG_CMD_FAT=y
 CONFIG_CMD_FS_GENERIC=y
 CONFIG_NET_RANDOM_ETHADDR=y
+CONFIG_ENV_OVERWRITE=y
 CONFIG_SYSCON=y
 CONFIG_CLK_SPACEMIT=y
 CONFIG_CLK_SPACEMIT_K3=y
@@ -122,5 +123,5 @@ CONFIG_MTDPARTS_DEFAULT="d420c000.spi:128K@0(bootinfo),512K@128K(fsbl),64K@640K(
 CONFIG_BOOTDELAY=2
 # CONFIG_BOOTSTD_BOOTCOMMAND is not set
 CONFIG_USE_BOOTCOMMAND=y
-CONFIG_BOOTCOMMAND="pci enum; nvme scan; usb start; if unzip 0x120000000 0x104000000 0x1000000; then mw.l 0x120000000 0 1; fatwrite nvme 0:1 0x104000000 barely-nano.bin ${filesize}; if source 0x11fe00000; then mw.l 0x11fe00000 0 1; else fatwrite nvme 0:1 0x11ff00000 boot.scr 0x2ff; mw.b 0x103F00000 0 0x10000; if load nvme 0:1 0x103F00000 config.toml; then setenv config_addr 0x103F00000; setenv config_size ${filesize}; fi; fi; go 0x104000000; elif load usb 0:1 0x138300000 boot.scr || load nvme 0:1 0x138300000 boot.scr || load mmc 0:1 0x138300000 boot.scr; then source 0x138300000; fi"
+CONFIG_BOOTCOMMAND="pci enum; setenv ethact eth1; nvme scan; usb start; if unzip 0x120000000 0x104000000 0x1000000; then mw.l 0x120000000 0 1; fatwrite nvme 0:1 0x104000000 barely-nano.bin ${filesize}; if source 0x11fe00000; then mw.l 0x11fe00000 0 1; else fatwrite nvme 0:1 0x11ff00000 boot.scr 0x2ff; mw.b 0x103F00000 0 0x10000; if load nvme 0:1 0x103F00000 config.toml; then setenv config_addr 0x103F00000; setenv config_size ${filesize}; fi; fi; go 0x104000000; elif load usb 0:1 0x138300000 boot.scr || load nvme 0:1 0x138300000 boot.scr || load mmc 0:1 0x138300000 boot.scr; then source 0x138300000; fi"
 # CONFIG_TOOLS_MKEFICAPSULE is not set

@@ -332,6 +332,17 @@ static int pcie_dw_spacemit_probe(struct udevice *dev)
 			writel(reg_b, pci->apmu_base + 0x1d0);
 		}
 
+		if (pci->port_id == 2 && pci->apmu_base) {
+			/* Route combo PHY2 (BIT(2)) and PHY3 (BIT(1)) to PCIe mode (0) in PMUA_USB_PHY_CTRL0 */
+			u32 usb_phy_ctrl = readl(pci->apmu_base + 0x110);
+
+			if (pci->num_lanes >= 2)
+				usb_phy_ctrl &= ~(BIT(2) | BIT(1));
+			else
+				usb_phy_ctrl &= ~BIT(2);
+			writel(usb_phy_ctrl, pci->apmu_base + 0x110);
+		}
+
 		ret = k3_pcie_map_lanes(pci);
 		if (ret) {
 			dev_err(dev, "failed to map lanes: %d\n", ret);
